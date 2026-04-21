@@ -4,7 +4,7 @@
 
 A small GPT-style transformer implemented from scratch in C with CUDA and MPI.
 Seminar project for "Konkurentno i distribuirano programiranje" at FON Belgrade.
-Training data: WhatsApp messages. MIT license.
+Training data: Serbian academic text (PDF textbook). MIT license.
 
 ## Build Commands
 
@@ -61,13 +61,14 @@ mpirun --allow-run-as-root -np 2 ./build/tests/test_distributed
 - `tests/` — all tests
 - `tools/` — CLI utilities (preprocess, train_bpe, tokenize, generate)
 - `colab/` — Google Colab setup and notebook
-- `data/raw/` — raw WhatsApp exports (gitignored, never commit)
+- `src/data/text_parser.c` — PDF text cleaner (removes page numbers, captions, bullets)
+- `data/raw/` — PDF and raw extracted text (gitignored, never commit)
 - `data/processed/` — tokenized binary files
 
 ## Model Architecture
 
 Small GPT-2 style: 2 layers, 128 embed dim, 4 heads, 512 ff dim, 512 vocab size.
-~270K parameters total. Trained on WhatsApp messages (Serbian, Latin script).
+~270K parameters total. Trained on Serbian academic text (Latin script).
 
 ## Session Workflow
 
@@ -77,7 +78,7 @@ Always run `ctest` after changes to verify nothing is broken.
 
 ## Important Notes
 
-- Never commit files from `data/raw/` (personal WhatsApp messages)
+- Never commit files from `data/raw/` (PDF and raw text)
 - The model will NOT produce coherent text — that's expected with 270K params
 - Loss decreasing during training = success
 - Keep explanations simple — this is a learning project
