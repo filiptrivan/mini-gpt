@@ -39,7 +39,11 @@ mpirun --allow-run-as-root -np 2 ./build/tests/test_distributed
 - Constants: `UPPER_SNAKE_CASE`
 - All memory: explicit `malloc`/`free`, no memory leaks
 - Keep functions short and single-purpose
-- Comments explain "why", not "what"
+- **Comments are for learning**: this is a beginner C project, so every function gets a detailed
+  block comment (purpose, parameters, return value, ownership/lifetime notes), and tricky C
+  syntax (pointer arithmetic, `strncmp` returning 0 on match, casts to `unsigned char`,
+  `malloc`/`free` ownership, `fseek`/`ftell`/`fread`, `memchr`, etc.) gets an inline comment.
+  This intentionally overrides the usual "comments explain why, not what" guideline.
 
 ## Testing
 
