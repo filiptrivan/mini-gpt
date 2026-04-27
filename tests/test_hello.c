@@ -30,6 +30,18 @@ static void test_sanity(void **state) {
  * `cmocka_run_group_tests` runs them all and returns the number of failures
  * (0 = all passed), which becomes the program's exit code — exactly what
  * `ctest` looks at.
+ *
+ * Why is `cmocka_unit_test` a macro and not a regular function? Two reasons:
+ *   1. It uses the preprocessor's `#` stringification operator to capture the
+ *      function's NAME as a string literal at compile time (e.g. turning the
+ *      token `test_sanity` into "test_sanity" so CMocka can print it in pass/
+ *      fail messages). A regular C function can't see the caller's source
+ *      text — only the preprocessor can.
+ *   2. It expands to a brace-enclosed struct initializer like
+ *      `{ "test_sanity", test_sanity, NULL, NULL, NULL }`, which slots
+ *      directly into the `CMUnitTest tests[]` array literal below. A function
+ *      can only return a value, not initializer syntax, so it couldn't be
+ *      used inside an array initializer this way.
  */
 int main(void) {
     const struct CMUnitTest tests[] = {

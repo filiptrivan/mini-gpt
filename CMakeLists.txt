@@ -18,6 +18,13 @@ if(ENABLE_MPI)
 endif()
 
 find_package(PkgConfig REQUIRED)
+# Ask the system tool `pkg-config` where the CMocka test framework is installed
+# (Homebrew on Mac, apt on Linux/Colab — different paths on each machine).
+# This auto-creates variables prefixed with CMOCKA_ that we use in tests/CMakeLists.txt:
+#   CMOCKA_INCLUDE_DIRS  → folder containing cmocka.h        (passed via include_directories)
+#   CMOCKA_LIBRARY_DIRS  → folder containing libcmocka       (passed via link_directories)
+#   CMOCKA_LIBRARIES     → library name to link against      (passed via target_link_libraries)
+# REQUIRED makes configure fail immediately with a clear error if CMocka isn't installed.
 pkg_check_modules(CMOCKA REQUIRED cmocka)
 
 enable_testing()
