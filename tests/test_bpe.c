@@ -46,9 +46,44 @@ static void test_create_has_256_base_byte_tokens(void **state) {
     bpe_free(tok);
 }
 
+/*
+ * test_encode_decode_empty_input — encoding/decoding nothing should
+ * return nothing, set the out-counts to zero, and not crash.
+ *
+ * This locks in the agreed edge-case behavior:
+ *   - empty input + length == 0 → return NULL, *out_count = 0
+ *   - NULL token list + count == 0 → return NULL, *out_length = 0
+ *
+ * The current stub implementations already match this contract, so the
+ * test passes immediately. Its real value is as a regression guard once
+ * the real encode/decode logic lands.
+ */
+static void test_encode_decode_empty_input(void **state) {
+    (void)state;
+
+    BPETokenizer *tok = bpe_create();
+    assert_non_null(tok);
+
+    /* We pre-set the OUT parameters to a sentinel value (999) so we can
+     * tell the difference between "the function wrote 0" and "the value
+     * happened to be 0 already." A real call must overwrite the sentinel. */
+    size_t n = 999;
+    int *toks = bpe_encode(tok, (const unsigned char *)"", 0, &n);
+    assert_null(toks);
+    assert_int_equal(n, 0);
+
+    size_t m = 999;
+    unsigned char *back = bpe_decode(tok, NULL, 0, &m);
+    assert_null(back);
+    assert_int_equal(m, 0);
+
+    bpe_free(tok);
+}
+
 int main(void) {
     const struct CMUnitTest tests[] = {
         cmocka_unit_test(test_create_has_256_base_byte_tokens),
+        cmocka_unit_test(test_encode_decode_empty_input),
     };
     return cmocka_run_group_tests(tests, NULL, NULL);
 }
