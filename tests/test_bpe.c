@@ -9,6 +9,7 @@
 #include <stddef.h>  /* size_t */
 #include <setjmp.h>  /* required by cmocka.h */
 #include <stdlib.h>  /* free — for releasing buffers returned by encode/decode */
+#include <string.h>  /* strlen */
 #include <cmocka.h>
 
 #include "tokenizer/bpe.h"
@@ -120,11 +121,114 @@ static void test_encode_decode_single_ascii_char(void **state) {
     bpe_free(tok);
 }
 
+/*
+ * test_encode_decode_longer_ascii_roundtrip — regression guard: verifies
+ * that encode/decode are correct on multi-byte input, not just one byte.
+ *
+ * Untrained tokenizer means one token per input byte, so we expect
+ * n == input_len, and decoding must return the exact same bytes.
+ */
+static void test_encode_decode_longer_ascii_roundtrip(void **state) {
+    (void)state;
+
+    BPETokenizer *tok = bpe_create();
+
+    const char *input = "Hello, World! This is a longer test string.";
+    size_t input_len = strlen(input);
+
+    size_t n = 0;
+    int *toks = bpe_encode(tok, (const unsigned char *)input, input_len, &n);
+    assert_non_null(toks);
+    assert_int_equal(n, input_len);  /* untrained: one token per byte */
+
+    size_t m = 0;
+    unsigned char *back = bpe_decode(tok, toks, n, &m);
+    assert_non_null(back);
+    assert_int_equal(m, input_len);
+    /* assert_memory_equal compares input_len bytes starting at back and input;
+     * fails if any byte differs. */
+    assert_memory_equal(back, input, input_len);
+
+    free(back);
+    free(toks);
+    bpe_free(tok);
+}
+
+/*
+ * test_encode_decode_serbian_utf8_roundtrip — proves the byte-level
+ * tokenizer handles multi-byte UTF-8 characters correctly, with no
+ * special Unicode logic on our side.
+ *
+ * Each Serbian Latin diacritic (č ž š đ ć) is 2 bytes in UTF-8. So an
+ * untrained tokenizer encoding "čžšđć" (5 chars, 10 bytes) produces a
+ * 10-token list. Decoding gives the same 10 bytes back, which any
+ * UTF-8 reader (including the test source string itself) interprets
+ * as the original 5 characters.
+ */
+static void test_encode_decode_serbian_utf8_roundtrip(void **state) {
+    (void)state;
+
+    BPETokenizer *tok = bpe_create();
+
+    /* The source file is UTF-8, so this literal is the byte sequence
+     * 0xC4 0x8D 0xC5 0xBE 0xC5 0xA1 0xC4 0x91 0xC4 0x87 — 10 bytes. */
+    const char *input = "čžšđć";
+    size_t input_len = strlen(input);
+    assert_int_equal(input_len, 10);  /* sanity-check our UTF-8 assumption */
+
+    size_t n = 0;
+    int *toks = bpe_encode(tok, (const unsigned char *)input, input_len, &n);
+    assert_non_null(toks);
+    assert_int_equal(n, 10);
+
+    size_t m = 0;
+    unsigned char *back = bpe_decode(tok, toks, n, &m);
+    assert_non_null(back);
+    assert_int_equal(m, 10);
+    assert_memory_equal(back, input, 10);
+
+    free(back);
+    free(toks);
+    bpe_free(tok);
+}
+
+/*
+ * test_encode_is_deterministic — same input must produce identical tokens.
+ *
+ * Tokenizers MUST be deterministic: a model trained on one tokenization
+ * is incompatible with a different one for the same text. This test
+ * locks the property in as a regression guard.
+ *
+ * `assert_memory_equal` compares bytes, so we pass the array length
+ * times sizeof(int) to compare full int values.
+ */
+static void test_encode_is_deterministic(void **state) {
+    (void)state;
+
+    BPETokenizer *tok = bpe_create();
+    const char *input = "Same input twice produces same tokens.";
+    size_t input_len = strlen(input);
+
+    size_t n1 = 0, n2 = 0;
+    int *toks1 = bpe_encode(tok, (const unsigned char *)input, input_len, &n1);
+    int *toks2 = bpe_encode(tok, (const unsigned char *)input, input_len, &n2);
+
+    assert_int_equal(n1, n2);
+    assert_memory_equal(toks1, toks2, n1 * sizeof(int));
+
+    free(toks2);
+    free(toks1);
+    bpe_free(tok);
+}
+
 int main(void) {
     const struct CMUnitTest tests[] = {
         cmocka_unit_test(test_create_has_256_base_byte_tokens),
         cmocka_unit_test(test_encode_decode_empty_input),
         cmocka_unit_test(test_encode_decode_single_ascii_char),
+        cmocka_unit_test(test_encode_decode_longer_ascii_roundtrip),
+        cmocka_unit_test(test_encode_decode_serbian_utf8_roundtrip),
+        cmocka_unit_test(test_encode_is_deterministic),
     };
     return cmocka_run_group_tests(tests, NULL, NULL);
 }
