@@ -8,6 +8,7 @@
 #include <stdarg.h>  /* required by cmocka.h before its own includes */
 #include <stddef.h>  /* size_t */
 #include <setjmp.h>  /* required by cmocka.h */
+#include <stdlib.h>  /* free — for releasing buffers returned by encode/decode */
 #include <cmocka.h>
 
 #include "tokenizer/bpe.h"
@@ -80,10 +81,50 @@ static void test_encode_decode_empty_input(void **state) {
     bpe_free(tok);
 }
 
+/*
+ * test_encode_decode_single_ascii_char — simplest non-trivial roundtrip.
+ *
+ * On an untrained tokenizer (no merges yet), encoding the single byte 'a'
+ * should produce one token with id 97 (the ASCII value of 'a'). Decoding
+ * that token list should reproduce the original byte exactly.
+ *
+ * This is the first test that forces real implementation work: the stub
+ * returns NULL, but here we expect a non-NULL malloc'd buffer with the
+ * correct contents.
+ */
+static void test_encode_decode_single_ascii_char(void **state) {
+    (void)state;
+
+    BPETokenizer *tok = bpe_create();
+    assert_non_null(tok);
+
+    /* Encode the single ASCII byte 'a' (= 0x61 = 97 in decimal).
+     * The cast to const unsigned char * matches the API's parameter type;
+     * the bytes themselves are unchanged. */
+    size_t n = 0;
+    int *toks = bpe_encode(tok, (const unsigned char *)"a", 1, &n);
+    assert_non_null(toks);
+    assert_int_equal(n, 1);
+    assert_int_equal(toks[0], 97);
+
+    /* Decode the token list back to bytes. */
+    size_t m = 0;
+    unsigned char *back = bpe_decode(tok, toks, n, &m);
+    assert_non_null(back);
+    assert_int_equal(m, 1);
+    assert_int_equal(back[0], (unsigned char)'a');
+
+    /* Three independent allocations -> three frees. */
+    free(back);
+    free(toks);
+    bpe_free(tok);
+}
+
 int main(void) {
     const struct CMUnitTest tests[] = {
         cmocka_unit_test(test_create_has_256_base_byte_tokens),
         cmocka_unit_test(test_encode_decode_empty_input),
+        cmocka_unit_test(test_encode_decode_single_ascii_char),
     };
     return cmocka_run_group_tests(tests, NULL, NULL);
 }

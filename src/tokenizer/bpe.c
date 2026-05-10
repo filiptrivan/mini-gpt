@@ -1,6 +1,7 @@
 #include "tokenizer/bpe.h"
 
 #include <stdlib.h>  /* malloc, free */
+#include <string.h>  /* memcpy */
 
 /*
  * bpe_create — allocate a fresh tokenizer with the 256 base byte tokens.
@@ -84,24 +85,85 @@ void bpe_train(BPETokenizer *tok,
     (void)num_merges;
 }
 
+/*
+ * bpe_encode — convert a byte buffer into a sequence of token ids.
+ *
+ * For an untrained tokenizer (no merges learned yet), token id == byte value:
+ * the byte 0x61 ('a') becomes token 97, byte 0xC4 becomes token 196, etc.
+ * Since vocab[i].bytes == {i} for i in 0..255, we can shortcut the lookup
+ * and emit the byte values directly.
+ *
+ * Once bpe_train fills in merges, this function will need to scan for
+ * adjacent (a, b) pairs and replace them with merged token ids — that's
+ * the next TDD step. For now, the no-merges path is enough.
+ */
 int *bpe_encode(const BPETokenizer *tok,
                 const unsigned char *text,
                 size_t length,
                 size_t *out_count) {
-    (void)tok;
-    (void)text;
-    (void)length;
-    if (out_count) *out_count = 0;
-    return NULL;
+    (void)tok;  /* unused on the no-merges path; merges will use it */
+
+    if (length == 0) {
+        *out_count = 0;
+        return NULL;
+    }
+
+    /* Allocate the output array: one int per input byte. sizeof(int) is
+     * usually 4 on a 64-bit system, so we get length*4 bytes back. */
+    int *toks = malloc(length * sizeof(int));
+
+    /* Copy each byte's value into the corresponding token slot. The cast
+     * `(int)text[i]` is implicit (unsigned char promotes to int) but written
+     * explicitly here for clarity. */
+    for (size_t i = 0; i < length; i++) {
+        toks[i] = (int)text[i];
+    }
+
+    *out_count = length;
+    return toks;
 }
 
+/*
+ * bpe_decode — convert a sequence of token ids back into raw bytes.
+ *
+ * Each token id i refers to vocab[i], a byte sequence of length
+ * vocab[i].length. The output is the concatenation of all those byte
+ * sequences. For an untrained tokenizer each entry is 1 byte, so output
+ * length == count. For a trained tokenizer, merged tokens contribute
+ * multiple bytes each, so output length >= count.
+ *
+ * Implemented as two passes: first sum the lengths to know how big the
+ * output buffer must be, then allocate and copy.
+ */
 unsigned char *bpe_decode(const BPETokenizer *tok,
                           const int *tokens,
                           size_t count,
                           size_t *out_length) {
-    (void)tok;
-    (void)tokens;
-    (void)count;
-    if (out_length) *out_length = 0;
-    return NULL;
+    if (count == 0) {
+        *out_length = 0;
+        return NULL;
+    }
+
+    /* Pass 1: compute total output size by summing each token's vocab length. */
+    size_t total = 0;
+    for (size_t i = 0; i < count; i++) {
+        total += tok->vocab[tokens[i]].length;
+    }
+
+    /* Allocate the output buffer. NOT NUL-terminated — caller uses *out_length. */
+    unsigned char *out = malloc(total);
+
+    /* Pass 2: copy each token's bytes into the buffer in order.
+     * `cursor` is a "running pointer" that starts at the beginning and
+     * advances after each memcpy by the number of bytes just written.
+     * `cursor += len` advances by `len` elements of unsigned char (= len bytes). */
+    unsigned char *cursor = out;
+    for (size_t i = 0; i < count; i++) {
+        size_t len = tok->vocab[tokens[i]].length;
+        memcpy(cursor, tok->vocab[tokens[i]].bytes, len);
+        cursor += len;
+    }
+
+    *out_length = total;
+    return out;
 }
