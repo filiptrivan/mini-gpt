@@ -206,39 +206,60 @@ void bpe_train(BPETokenizer *tok,
 /*
  * bpe_encode — convert a byte buffer into a sequence of token ids.
  *
- * For an untrained tokenizer (no merges learned yet), token id == byte value:
- * the byte 0x61 ('a') becomes token 97, byte 0xC4 becomes token 196, etc.
- * Since vocab[i].bytes == {i} for i in 0..255, we can shortcut the lookup
- * and emit the byte values directly.
+ * Algorithm: start with each input byte as its own token id, then apply
+ * each learned merge in priority order. A merge replaces every adjacent
+ * (a, b) pair in the sequence with the merged id (256 + merge_index),
+ * shrinking the sequence as it goes. This is the same in-place compaction
+ * used inside bpe_train.
  *
- * Once bpe_train fills in merges, this function will need to scan for
- * adjacent (a, b) pairs and replace them with merged token ids — that's
- * the next TDD step. For now, the no-merges path is enough.
+ * Untrained tokenizer (num_merges == 0): the merge loop runs zero times
+ * and we just emit the input bytes as token ids — which matches the
+ * "byte value == token id" property of the base vocab.
+ *
+ * The output buffer is allocated at the input length (the worst case)
+ * and may end up using fewer slots after merges. We don't realloc-shrink
+ * because the savings are tiny and free() doesn't care about excess capacity.
  */
 int *bpe_encode(const BPETokenizer *tok,
                 const unsigned char *text,
                 size_t length,
                 size_t *out_count) {
-    (void)tok;  /* unused on the no-merges path; merges will use it */
-
     if (length == 0) {
         *out_count = 0;
         return NULL;
     }
 
-    /* Allocate the output array: one int per input byte. sizeof(int) is
-     * usually 4 on a 64-bit system, so we get length*4 bytes back. */
-    int *toks = malloc(length * sizeof(int));
+    /* Worst case: each byte becomes its own token. */
+    int *seq = malloc(length * sizeof(int));
+    size_t seq_len = length;
 
-    /* Copy each byte's value into the corresponding token slot. The cast
-     * `(int)text[i]` is implicit (unsigned char promotes to int) but written
-     * explicitly here for clarity. */
+    /* Initialize the sequence with raw byte values as token ids. */
     for (size_t i = 0; i < length; i++) {
-        toks[i] = (int)text[i];
+        seq[i] = (int)text[i];
     }
 
-    *out_count = length;
-    return toks;
+    /* Apply each learned merge in priority order (lowest index = highest
+     * priority). For each merge, do one pass of two-pointer compaction
+     * over the sequence. */
+    for (int m = 0; m < tok->num_merges; m++) {
+        int a = tok->merges[m].a;
+        int b = tok->merges[m].b;
+        int new_id = 256 + m;
+
+        size_t w = 0;
+        for (size_t r = 0; r < seq_len; ) {
+            if (r + 1 < seq_len && seq[r] == a && seq[r + 1] == b) {
+                seq[w++] = new_id;
+                r += 2;
+            } else {
+                seq[w++] = seq[r++];
+            }
+        }
+        seq_len = w;
+    }
+
+    *out_count = seq_len;
+    return seq;
 }
 
 /*

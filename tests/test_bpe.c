@@ -265,6 +265,42 @@ static void test_train_classic_example(void **state) {
     bpe_free(tok);
 }
 
+/*
+ * test_encode_applies_learned_merges — verifies that bpe_encode actually
+ * uses the merges learned during training, not just emits raw bytes.
+ *
+ * After training on "aaabdaaabac" with 3 merges (see docs/bpe-training.md),
+ * encoding "aaabd" should produce [258, 100] — only 2 tokens for 5 bytes,
+ * because the substring "aaab" was learned as a single token (id 258).
+ *
+ * We also verify the roundtrip property still holds: decoding [258, 100]
+ * must give back the original 5 bytes "aaabd".
+ */
+static void test_encode_applies_learned_merges(void **state) {
+    (void)state;
+
+    BPETokenizer *tok = bpe_create();
+    bpe_train(tok, (const unsigned char *)"aaabdaaabac", 11, 3);
+
+    size_t n = 0;
+    int *toks = bpe_encode(tok, (const unsigned char *)"aaabd", 5, &n);
+    assert_non_null(toks);
+    assert_int_equal(n, 2);
+    assert_int_equal(toks[0], 258);  /* token "aaab" */
+    assert_int_equal(toks[1], 100);  /* byte 'd' */
+
+    /* Roundtrip must still hold. */
+    size_t m = 0;
+    unsigned char *back = bpe_decode(tok, toks, n, &m);
+    assert_non_null(back);
+    assert_int_equal(m, 5);
+    assert_memory_equal(back, "aaabd", 5);
+
+    free(back);
+    free(toks);
+    bpe_free(tok);
+}
+
 int main(void) {
     const struct CMUnitTest tests[] = {
         cmocka_unit_test(test_create_has_256_base_byte_tokens),
@@ -274,6 +310,7 @@ int main(void) {
         cmocka_unit_test(test_encode_decode_serbian_utf8_roundtrip),
         cmocka_unit_test(test_encode_is_deterministic),
         cmocka_unit_test(test_train_classic_example),
+        cmocka_unit_test(test_encode_applies_learned_merges),
     };
     return cmocka_run_group_tests(tests, NULL, NULL);
 }
