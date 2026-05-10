@@ -1,13 +1,9 @@
 /* Test executable for the BPE tokenizer.
  *
- * For now this file contains only a single trivial test that always passes.
- * Its purpose at this stage is to verify that:
- *   - the bpe library builds and links,
- *   - CMake registers the executable as a CTest target,
- *   - CMocka's test runner is wired up correctly.
- *
- * Real BPE tests (init, encode/decode roundtrip, training, Serbian UTF-8,
- * determinism, ...) will be added one-by-one in the TDD step. */
+ * Tests are added one at a time, TDD-style:
+ *   - write the test,
+ *   - run it and watch it fail,
+ *   - implement just enough in src/tokenizer/bpe.c to make it pass. */
 
 #include <stdarg.h>  /* required by cmocka.h before its own includes */
 #include <stddef.h>  /* size_t */
@@ -16,17 +12,43 @@
 
 #include "tokenizer/bpe.h"
 
-/* test_placeholder — proves the test harness runs. We reference the BPE
- * header above to also confirm the include path is set up correctly; the
- * actual assertion is trivially true. */
-static void test_placeholder(void **state) {
-    (void)state;  /* unused — CMocka passes per-test state we don't need */
-    assert_int_equal(1, 1);
+/*
+ * test_create_has_256_base_byte_tokens — the very first test.
+ *
+ * After bpe_create() the tokenizer should be in a clean "untrained" state:
+ * vocab_size == 256, no merges, and vocab[i] holds the single byte i.
+ * This is the foundation every later test builds on.
+ */
+static void test_create_has_256_base_byte_tokens(void **state) {
+    (void)state;  /* per-test state — we don't use it */
+
+    /* Allocate the tokenizer. assert_non_null prints a clear message and
+     * stops the test if bpe_create returned NULL. */
+    BPETokenizer *tok = bpe_create();
+    assert_non_null(tok);
+
+    /* Top-level invariants of a freshly-created tokenizer. */
+    assert_int_equal(tok->vocab_size, 256);
+    assert_int_equal(tok->num_merges, 0);
+    assert_null(tok->merges);   /* no merges learned yet */
+    assert_non_null(tok->vocab); /* but vocab itself must exist */
+
+    /* Walk the vocab and confirm each entry is exactly the single byte
+     * equal to its index. `unsigned char` here matches the type in
+     * VocabEntry.bytes — keeps the comparison unambiguous for byte 0xFF. */
+    for (int i = 0; i < 256; i++) {
+        assert_int_equal(tok->vocab[i].length, 1);
+        assert_non_null(tok->vocab[i].bytes);
+        assert_int_equal(tok->vocab[i].bytes[0], (unsigned char)i);
+    }
+
+    /* Always pair create with free, even in tests, to catch leaks early. */
+    bpe_free(tok);
 }
 
 int main(void) {
     const struct CMUnitTest tests[] = {
-        cmocka_unit_test(test_placeholder),
+        cmocka_unit_test(test_create_has_256_base_byte_tokens),
     };
     return cmocka_run_group_tests(tests, NULL, NULL);
 }
