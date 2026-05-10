@@ -9,10 +9,12 @@
 #include <stddef.h>  /* size_t */
 #include <setjmp.h>  /* required by cmocka.h */
 #include <stdlib.h>  /* free — for releasing buffers returned by encode/decode */
+#include <stdio.h>   /* remove — clean up the temp file the IO test writes */
 #include <string.h>  /* strlen */
 #include <cmocka.h>
 
 #include "tokenizer/bpe.h"
+#include "tokenizer/bpe_io.h"
 
 /*
  * test_create_has_256_base_byte_tokens — the very first test.
@@ -301,6 +303,64 @@ static void test_encode_applies_learned_merges(void **state) {
     bpe_free(tok);
 }
 
+/*
+ * test_save_load_roundtrip — train a tokenizer, save it, load it back,
+ * verify every piece of state matches and that encoding produces the
+ * same tokens with the loaded tokenizer as with the original.
+ *
+ * Uses /tmp for the binary file (works on Mac M2 + Linux/Colab; fine
+ * for our targets). Cleans up afterwards with remove().
+ */
+static void test_save_load_roundtrip(void **state) {
+    (void)state;
+
+    /* Step 1: train a tokenizer (the canonical example). */
+    BPETokenizer *tok = bpe_create();
+    bpe_train(tok, (const unsigned char *)"aaabdaaabac", 11, 3);
+
+    /* Step 2: save it. */
+    const char *path = "/tmp/test_bpe_io.bin";
+    int rc = bpe_save(tok, path);
+    assert_int_equal(rc, 0);
+
+    /* Step 3: load it into a new tokenizer. */
+    BPETokenizer *loaded = bpe_load(path);
+    assert_non_null(loaded);
+
+    /* Step 4: top-level state matches. */
+    assert_int_equal(loaded->num_merges, tok->num_merges);
+    assert_int_equal(loaded->vocab_size, tok->vocab_size);
+
+    /* Step 5: every merge rule matches. */
+    for (int i = 0; i < tok->num_merges; i++) {
+        assert_int_equal(loaded->merges[i].a, tok->merges[i].a);
+        assert_int_equal(loaded->merges[i].b, tok->merges[i].b);
+    }
+
+    /* Step 6: every vocab entry matches (including reconstructed ones). */
+    for (int i = 0; i < tok->vocab_size; i++) {
+        assert_int_equal(loaded->vocab[i].length, tok->vocab[i].length);
+        assert_memory_equal(loaded->vocab[i].bytes, tok->vocab[i].bytes,
+                            tok->vocab[i].length);
+    }
+
+    /* Step 7: encoding with the loaded tokenizer must produce identical
+     * tokens — the strongest possible behavioral check. */
+    size_t n1 = 0, n2 = 0;
+    int *toks1 = bpe_encode(tok, (const unsigned char *)"aaabd", 5, &n1);
+    int *toks2 = bpe_encode(loaded, (const unsigned char *)"aaabd", 5, &n2);
+    assert_int_equal(n1, n2);
+    assert_memory_equal(toks1, toks2, n1 * sizeof(int));
+
+    free(toks2);
+    free(toks1);
+    bpe_free(loaded);
+    bpe_free(tok);
+
+    /* Clean up the temp file so reruns don't see stale state. */
+    remove(path);
+}
+
 int main(void) {
     const struct CMUnitTest tests[] = {
         cmocka_unit_test(test_create_has_256_base_byte_tokens),
@@ -311,6 +371,7 @@ int main(void) {
         cmocka_unit_test(test_encode_is_deterministic),
         cmocka_unit_test(test_train_classic_example),
         cmocka_unit_test(test_encode_applies_learned_merges),
+        cmocka_unit_test(test_save_load_roundtrip),
     };
     return cmocka_run_group_tests(tests, NULL, NULL);
 }
