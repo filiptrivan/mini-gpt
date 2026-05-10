@@ -4,43 +4,79 @@
 #include <string.h>  /* memcpy */
 
 /*
- * bpe_create — allocate a fresh tokenizer with the 256 base byte tokens.
+ * apply_merge — replace every adjacent (a, b) pair in seq with new_id,
+ * compacting the sequence in place. Returns the new length.
  *
- * The vocab is laid out so that token id i (for i in 0..255) represents
- * the single raw byte i. No merges have been learned yet.
+ * Two-pointer compaction: r reads, w writes, w <= r holds throughout
+ * because the output is always shorter or equal length than the input.
+ */
+static size_t apply_merge(int *seq, size_t seq_len, int a, int b, int new_id) {
+    size_t w = 0;
+    for (size_t r = 0; r < seq_len; ) {
+        if (r + 1 < seq_len && seq[r] == a && seq[r + 1] == b) {
+            seq[w++] = new_id;
+            r += 2;
+        } else {
+            seq[w++] = seq[r++];
+        }
+    }
+    return w;
+}
+
+/*
+ * bpe_build_merged_vocab_entry — set vocab[new_id] to the byte
+ * concatenation of vocab[a] and vocab[b]. Allocates a fresh bytes buffer.
  *
- * Memory model: we make 1 + 1 + 256 = 258 separate malloc calls — one for
- * the struct, one for the vocab array, and one per VocabEntry's bytes buffer.
- * bpe_free undoes them all in reverse.
+ * Pointer arithmetic note: `bytes + la` advances by la elements of
+ * unsigned char (= la bytes), so the second memcpy lands right after
+ * parent A's bytes.
+ */
+void bpe_build_merged_vocab_entry(VocabEntry *vocab, int new_id, int a, int b) {
+    size_t la = vocab[a].length;
+    size_t lb = vocab[b].length;
+    vocab[new_id].length = la + lb;
+    vocab[new_id].bytes = malloc(la + lb);
+    memcpy(vocab[new_id].bytes, vocab[a].bytes, la);
+    memcpy(vocab[new_id].bytes + la, vocab[b].bytes, lb);
+}
+
+/*
+ * bpe_create — allocate a fresh tokenizer with the BPE_BASE_VOCAB base byte
+ * tokens. Token id i (for i in 0..BPE_BASE_VOCAB-1) represents the single
+ * raw byte i. No merges have been learned yet.
+ *
+ * Memory model: we make 1 + 1 + BPE_BASE_VOCAB separate malloc calls — one
+ * for the struct, one for the vocab array, and one per VocabEntry's bytes
+ * buffer. bpe_free undoes them all in reverse.
  *
  * We deliberately do NOT handle malloc failure: on a desktop OS asking for
  * a few hundred bytes essentially never fails, and the cleanup logic would
  * dwarf the actual code. This matches the project's "learning over robustness"
- * stance for now.
+ * stance.
  */
 BPETokenizer *bpe_create(void) {
     /* Step 1: allocate the struct itself.
      * sizeof(BPETokenizer) is "however many bytes one BPETokenizer occupies".
-     * The cast `(BPETokenizer *)` is implicit in C — malloc returns void*
-     * (a pointer to anything) and C auto-converts it to whatever type we
-     * assign it to. */
+     * malloc returns void* (a pointer to anything) and C auto-converts it
+     * to whatever type we assign it to. */
     BPETokenizer *tok = malloc(sizeof(BPETokenizer));
 
     /* Step 2: initialize the top-level fields.
      * `tok->field` is shorthand for `(*tok).field` — follow the pointer,
      * then read/write the field. */
-    tok->vocab_size = 256;
+    tok->vocab_size = BPE_BASE_VOCAB;
     tok->num_merges = 0;
     tok->merges = NULL;  /* no merges learned yet; bpe_train fills this in */
 
-    /* Step 3: allocate the vocab array — 256 VocabEntry structs back-to-back
-     * in one contiguous block. tok->vocab[i] then accesses the i-th entry. */
-    tok->vocab = malloc(256 * sizeof(VocabEntry));
+    /* Step 3: allocate the vocab array — BPE_BASE_VOCAB VocabEntry structs
+     * back-to-back in one contiguous block. tok->vocab[i] then accesses
+     * the i-th entry. */
+    tok->vocab = malloc(BPE_BASE_VOCAB * sizeof(VocabEntry));
 
     /* Step 4: fill in each base byte token. Token id i stores the single
      * byte whose value is also i, so decoding token 65 produces 'A', token
      * 97 produces 'a', and so on for the full 0..255 range. */
-    for (int i = 0; i < 256; i++) {
+    for (int i = 0; i < BPE_BASE_VOCAB; i++) {
         tok->vocab[i].length = 1;
         tok->vocab[i].bytes = malloc(1);  /* exactly one byte */
         tok->vocab[i].bytes[0] = (unsigned char)i;
@@ -102,8 +138,8 @@ void bpe_train(BPETokenizer *tok,
     if (num_merges <= 0 || length < 2) return;
 
     /* ---- Step 1: copy input bytes into a mutable int sequence ---- */
-    /* Bytes can hold values 0..255; merged ids start at 256, so we need
-     * ints. Also the input is const, so we work on a copy. */
+    /* Bytes can hold values 0..255; merged ids start at BPE_BASE_VOCAB, so
+     * we need ints. Also the input is const, so we work on a copy. */
     int *seq = malloc(length * sizeof(int));
     size_t seq_len = length;
     for (size_t i = 0; i < length; i++) {
@@ -114,10 +150,11 @@ void bpe_train(BPETokenizer *tok,
     /* Pre-allocate up to num_merges slots. If we stop early the extra
      * slots stay unused; tok->num_merges tells callers how many are valid. */
     tok->merges = malloc(num_merges * sizeof(Merge));
-    /* realloc grows the vocab array. The first 256 entries (base bytes)
-     * are preserved by realloc — its contract is to copy the old contents
-     * into the (possibly new) location. */
-    tok->vocab = realloc(tok->vocab, (256 + num_merges) * sizeof(VocabEntry));
+    /* realloc grows the vocab array. The base byte entries are preserved
+     * by realloc — its contract is to copy the old contents into the
+     * (possibly new) location. */
+    tok->vocab = realloc(tok->vocab,
+                         (BPE_BASE_VOCAB + num_merges) * sizeof(VocabEntry));
 
     /* ---- Step 3: do up to num_merges merges ---- */
     int merges_done = 0;
@@ -166,39 +203,19 @@ void bpe_train(BPETokenizer *tok,
         if (best_count == 0) break;
 
         /* ---- 3b. Record the merge and build the new vocab entry ---- */
-        int new_id = 256 + merges_done;
+        int new_id = BPE_BASE_VOCAB + merges_done;
         tok->merges[merges_done].a = best_a;
         tok->merges[merges_done].b = best_b;
-
-        size_t la = tok->vocab[best_a].length;
-        size_t lb = tok->vocab[best_b].length;
-        tok->vocab[new_id].length = la + lb;
-        tok->vocab[new_id].bytes = malloc(la + lb);
-        /* Concatenate: copy parent A's bytes, then parent B's bytes
-         * starting at offset `la`. Pointer arithmetic: `bytes + la`
-         * advances by la elements (= la bytes for unsigned char). */
-        memcpy(tok->vocab[new_id].bytes, tok->vocab[best_a].bytes, la);
-        memcpy(tok->vocab[new_id].bytes + la, tok->vocab[best_b].bytes, lb);
+        bpe_build_merged_vocab_entry(tok->vocab, new_id, best_a, best_b);
 
         /* ---- 3c. Replace (best_a, best_b) with new_id in seq ---- */
-        /* Two-pointer in-place compaction. r reads, w writes, w <= r
-         * always holds because the output is shorter or equal length. */
-        size_t w = 0;
-        for (size_t r = 0; r < seq_len; ) {
-            if (r + 1 < seq_len && seq[r] == best_a && seq[r + 1] == best_b) {
-                seq[w++] = new_id;
-                r += 2;
-            } else {
-                seq[w++] = seq[r++];
-            }
-        }
-        seq_len = w;
+        seq_len = apply_merge(seq, seq_len, best_a, best_b, new_id);
         merges_done++;
     }
 
     /* ---- Step 4: finalize ---- */
     tok->num_merges = merges_done;
-    tok->vocab_size = 256 + merges_done;
+    tok->vocab_size = BPE_BASE_VOCAB + merges_done;
 
     free(seq);
 }
@@ -208,7 +225,7 @@ void bpe_train(BPETokenizer *tok,
  *
  * Algorithm: start with each input byte as its own token id, then apply
  * each learned merge in priority order. A merge replaces every adjacent
- * (a, b) pair in the sequence with the merged id (256 + merge_index),
+ * (a, b) pair in the sequence with the merged id (BPE_BASE_VOCAB + index),
  * shrinking the sequence as it goes. This is the same in-place compaction
  * used inside bpe_train.
  *
@@ -239,23 +256,11 @@ int *bpe_encode(const BPETokenizer *tok,
     }
 
     /* Apply each learned merge in priority order (lowest index = highest
-     * priority). For each merge, do one pass of two-pointer compaction
-     * over the sequence. */
+     * priority). For each merge, do one pass of two-pointer compaction. */
     for (int m = 0; m < tok->num_merges; m++) {
-        int a = tok->merges[m].a;
-        int b = tok->merges[m].b;
-        int new_id = 256 + m;
-
-        size_t w = 0;
-        for (size_t r = 0; r < seq_len; ) {
-            if (r + 1 < seq_len && seq[r] == a && seq[r + 1] == b) {
-                seq[w++] = new_id;
-                r += 2;
-            } else {
-                seq[w++] = seq[r++];
-            }
-        }
-        seq_len = w;
+        seq_len = apply_merge(seq, seq_len,
+                              tok->merges[m].a, tok->merges[m].b,
+                              BPE_BASE_VOCAB + m);
     }
 
     *out_count = seq_len;

@@ -7,12 +7,9 @@
 
 #include <stddef.h>  /* for size_t */
 
-/* ---------------------------------------------------------------------------
- * NOTE: This header is a FIRST-DRAFT sketch of the BPE public API. Function
- * signatures, struct shape, and ownership rules are likely to change after
- * we discuss the design. Treat anything here as provisional until we agree
- * and implement the real logic via TDD.
- * ------------------------------------------------------------------------- */
+/* Number of base byte tokens — token id i (for i in 0..255) represents the
+ * single byte i. All learned merges use ids >= BPE_BASE_VOCAB. */
+#define BPE_BASE_VOCAB 256
 
 /*
  * VocabEntry — one entry in the tokenizer's vocabulary.
@@ -100,15 +97,11 @@ void bpe_free(BPETokenizer *tok);
  *   text       : raw input bytes (no NUL-termination needed; we use length).
  *   length     : number of bytes in `text`.
  *   num_merges : how many merge rules to learn. After training,
- *                tok->vocab_size == 256 + num_merges.
+ *                tok->vocab_size == BPE_BASE_VOCAB + num_merges. If the corpus
+ *                is too small to produce all requested merges, training stops
+ *                early and num_merges reflects the actual count achieved.
  *
- * Algorithm sketch (to be implemented):
- *   1. Convert input bytes to a sequence of token ids (each byte is its own id).
- *   2. Repeat num_merges times:
- *      a. Count adjacent pairs.
- *      b. Pick the most frequent pair (a, b). Ties broken deterministically.
- *      c. Add (a, b) -> (256 + merge_index) to the merge table and vocab.
- *      d. Replace every (a, b) in the sequence with the new id.
+ * See docs/bpe-training.md for a worked example of the algorithm.
  */
 void bpe_train(BPETokenizer *tok,
                const unsigned char *text,
@@ -124,10 +117,8 @@ void bpe_train(BPETokenizer *tok,
  *   length    : number of bytes in `text`.
  *   out_count : OUT — set to the number of token ids returned.
  *
- * Returns: a malloc'd int* array of length *out_count, or NULL on failure.
- *
- * Edge case: length == 0  → returns a malloc'd zero-length buffer (or NULL
- * sentinel; we'll pin this down during TDD) and *out_count == 0.
+ * Returns: a malloc'd int* array of length *out_count, or NULL on failure
+ * or when length == 0 (in which case *out_count is set to 0).
  *
  * Ownership: caller must free() the returned pointer.
  */
@@ -157,5 +148,14 @@ unsigned char *bpe_decode(const BPETokenizer *tok,
                           const int *tokens,
                           size_t count,
                           size_t *out_length);
+
+/*
+ * bpe_build_merged_vocab_entry — internal helper shared by bpe_train and
+ * bpe_load. Sets vocab[new_id] to the byte concatenation of vocab[a] and
+ * vocab[b], malloc'ing the bytes buffer.
+ *
+ * Caller must have grown the vocab array to include index new_id.
+ */
+void bpe_build_merged_vocab_entry(VocabEntry *vocab, int new_id, int a, int b);
 
 #endif /* BPE_H */

@@ -11,7 +11,7 @@ target_compile_definitions(test_text_parser PRIVATE
     FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/helpers/fixtures")
 add_test(NAME test_text_parser COMMAND test_text_parser)
 
-# BPE tokenizer tests — placeholder for now; full TDD suite added next.
+# BPE tokenizer tests.
 add_executable(test_bpe test_bpe.c)
 target_link_libraries(test_bpe bpe ${CMOCKA_LIBRARIES})
 add_test(NAME test_bpe COMMAND test_bpe)

@@ -1,9 +1,4 @@
-/* Test executable for the BPE tokenizer.
- *
- * Tests are added one at a time, TDD-style:
- *   - write the test,
- *   - run it and watch it fail,
- *   - implement just enough in src/tokenizer/bpe.c to make it pass. */
+/* Test executable for the BPE tokenizer. */
 
 #include <stdarg.h>  /* required by cmocka.h before its own includes */
 #include <stddef.h>  /* size_t */
@@ -54,13 +49,9 @@ static void test_create_has_256_base_byte_tokens(void **state) {
  * test_encode_decode_empty_input — encoding/decoding nothing should
  * return nothing, set the out-counts to zero, and not crash.
  *
- * This locks in the agreed edge-case behavior:
+ * Locks in the edge-case contract:
  *   - empty input + length == 0 → return NULL, *out_count = 0
  *   - NULL token list + count == 0 → return NULL, *out_length = 0
- *
- * The current stub implementations already match this contract, so the
- * test passes immediately. Its real value is as a regression guard once
- * the real encode/decode logic lands.
  */
 static void test_encode_decode_empty_input(void **state) {
     (void)state;
@@ -90,10 +81,6 @@ static void test_encode_decode_empty_input(void **state) {
  * On an untrained tokenizer (no merges yet), encoding the single byte 'a'
  * should produce one token with id 97 (the ASCII value of 'a'). Decoding
  * that token list should reproduce the original byte exactly.
- *
- * This is the first test that forces real implementation work: the stub
- * returns NULL, but here we expect a non-NULL malloc'd buffer with the
- * correct contents.
  */
 static void test_encode_decode_single_ascii_char(void **state) {
     (void)state;
