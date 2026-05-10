@@ -75,14 +75,132 @@ void bpe_free(BPETokenizer *tok) {
     free(tok);
 }
 
+/*
+ * bpe_train — learn up to `num_merges` merge rules from the given byte
+ * buffer. See docs/bpe-training.md for a worked example of the algorithm.
+ *
+ * Algorithm summary:
+ *   1. Copy input bytes into a mutable int sequence (each byte = its id).
+ *   2. Allocate space for merges and grow vocab to 256+num_merges entries.
+ *   3. Repeat up to num_merges times:
+ *      a. Find the most frequent adjacent pair (first-occurrence tie-break).
+ *      b. Record the merge; build the new vocab entry by concatenating
+ *         the two parent tokens' byte sequences.
+ *      c. Replace every occurrence of that pair in the sequence with the
+ *         new merged id (in-place, two-pointer compaction).
+ *   4. Update num_merges and vocab_size; free the working sequence.
+ *
+ * If the corpus is too small to produce all requested merges (no pair
+ * occurs more than once), training stops early and num_merges reflects
+ * the actual count achieved.
+ */
 void bpe_train(BPETokenizer *tok,
                const unsigned char *text,
                size_t length,
                int num_merges) {
-    (void)tok;
-    (void)text;
-    (void)length;
-    (void)num_merges;
+    /* Edge cases: 0 merges = no-op. Length < 2 means no pair can exist. */
+    if (num_merges <= 0 || length < 2) return;
+
+    /* ---- Step 1: copy input bytes into a mutable int sequence ---- */
+    /* Bytes can hold values 0..255; merged ids start at 256, so we need
+     * ints. Also the input is const, so we work on a copy. */
+    int *seq = malloc(length * sizeof(int));
+    size_t seq_len = length;
+    for (size_t i = 0; i < length; i++) {
+        seq[i] = (int)text[i];
+    }
+
+    /* ---- Step 2: allocate merges + grow vocab ---- */
+    /* Pre-allocate up to num_merges slots. If we stop early the extra
+     * slots stay unused; tok->num_merges tells callers how many are valid. */
+    tok->merges = malloc(num_merges * sizeof(Merge));
+    /* realloc grows the vocab array. The first 256 entries (base bytes)
+     * are preserved by realloc — its contract is to copy the old contents
+     * into the (possibly new) location. */
+    tok->vocab = realloc(tok->vocab, (256 + num_merges) * sizeof(VocabEntry));
+
+    /* ---- Step 3: do up to num_merges merges ---- */
+    int merges_done = 0;
+    for (int iter = 0; iter < num_merges; iter++) {
+        /* Need at least 2 tokens to form a pair. */
+        if (seq_len < 2) break;
+
+        /* ---- 3a. Find the most frequent pair ---- */
+        /* For each NEW pair we encounter (one we haven't already considered
+         * earlier in this scan), count its total occurrences. Track the
+         * best as we go. We update `best` only on STRICTLY greater count,
+         * so when two pairs tie, the one encountered FIRST stays the best
+         * — that's our deterministic tie-break rule. */
+        int best_a = -1, best_b = -1, best_count = 0;
+
+        for (size_t i = 0; i + 1 < seq_len; i++) {
+            int a = seq[i], b = seq[i + 1];
+
+            /* Skip if this same (a, b) pair appeared earlier in this scan
+             * (we already counted it then). Without this we'd recount the
+             * same pair multiple times and pick a non-deterministic best. */
+            int seen_earlier = 0;
+            for (size_t j = 0; j < i; j++) {
+                if (seq[j] == a && seq[j + 1] == b) {
+                    seen_earlier = 1;
+                    break;
+                }
+            }
+            if (seen_earlier) continue;
+
+            /* Count occurrences of (a, b) starting from i. */
+            int count = 0;
+            for (size_t j = i; j + 1 < seq_len; j++) {
+                if (seq[j] == a && seq[j + 1] == b) count++;
+            }
+
+            if (count > best_count) {
+                best_count = count;
+                best_a = a;
+                best_b = b;
+            }
+        }
+
+        /* No pair found (every position was a singleton — impossible if
+         * seq_len >= 2, but defensive). */
+        if (best_count == 0) break;
+
+        /* ---- 3b. Record the merge and build the new vocab entry ---- */
+        int new_id = 256 + merges_done;
+        tok->merges[merges_done].a = best_a;
+        tok->merges[merges_done].b = best_b;
+
+        size_t la = tok->vocab[best_a].length;
+        size_t lb = tok->vocab[best_b].length;
+        tok->vocab[new_id].length = la + lb;
+        tok->vocab[new_id].bytes = malloc(la + lb);
+        /* Concatenate: copy parent A's bytes, then parent B's bytes
+         * starting at offset `la`. Pointer arithmetic: `bytes + la`
+         * advances by la elements (= la bytes for unsigned char). */
+        memcpy(tok->vocab[new_id].bytes, tok->vocab[best_a].bytes, la);
+        memcpy(tok->vocab[new_id].bytes + la, tok->vocab[best_b].bytes, lb);
+
+        /* ---- 3c. Replace (best_a, best_b) with new_id in seq ---- */
+        /* Two-pointer in-place compaction. r reads, w writes, w <= r
+         * always holds because the output is shorter or equal length. */
+        size_t w = 0;
+        for (size_t r = 0; r < seq_len; ) {
+            if (r + 1 < seq_len && seq[r] == best_a && seq[r + 1] == best_b) {
+                seq[w++] = new_id;
+                r += 2;
+            } else {
+                seq[w++] = seq[r++];
+            }
+        }
+        seq_len = w;
+        merges_done++;
+    }
+
+    /* ---- Step 4: finalize ---- */
+    tok->num_merges = merges_done;
+    tok->vocab_size = 256 + merges_done;
+
+    free(seq);
 }
 
 /*

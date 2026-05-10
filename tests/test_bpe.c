@@ -221,6 +221,50 @@ static void test_encode_is_deterministic(void **state) {
     bpe_free(tok);
 }
 
+/*
+ * test_train_classic_example — verifies bpe_train against the by-hand
+ * walkthrough from docs/bpe-training.md.
+ *
+ * Training on "aaabdaaabac" with 3 merges should produce:
+ *   merges[0] = (97, 97)   -> token 256, vocab "aa"   (2 bytes)
+ *   merges[1] = (256, 97)  -> token 257, vocab "aaa"  (3 bytes)
+ *   merges[2] = (257, 98)  -> token 258, vocab "aaab" (4 bytes)
+ *
+ * This is the smallest test that exercises the full training algorithm:
+ * pair counting, tie-breaking, vocab growth via merged-byte concatenation,
+ * and use of a previously-merged token as input to a later merge.
+ */
+static void test_train_classic_example(void **state) {
+    (void)state;
+
+    BPETokenizer *tok = bpe_create();
+
+    const unsigned char *input = (const unsigned char *)"aaabdaaabac";
+    bpe_train(tok, input, 11, 3);
+
+    /* Top-level state. */
+    assert_int_equal(tok->num_merges, 3);
+    assert_int_equal(tok->vocab_size, 259);
+
+    /* Each merge rule is exactly the (a, b) pair we worked out by hand. */
+    assert_int_equal(tok->merges[0].a, 97);
+    assert_int_equal(tok->merges[0].b, 97);
+    assert_int_equal(tok->merges[1].a, 256);
+    assert_int_equal(tok->merges[1].b, 97);
+    assert_int_equal(tok->merges[2].a, 257);
+    assert_int_equal(tok->merges[2].b, 98);
+
+    /* New vocab entries hold the concatenated bytes. */
+    assert_int_equal(tok->vocab[256].length, 2);
+    assert_memory_equal(tok->vocab[256].bytes, "aa", 2);
+    assert_int_equal(tok->vocab[257].length, 3);
+    assert_memory_equal(tok->vocab[257].bytes, "aaa", 3);
+    assert_int_equal(tok->vocab[258].length, 4);
+    assert_memory_equal(tok->vocab[258].bytes, "aaab", 4);
+
+    bpe_free(tok);
+}
+
 int main(void) {
     const struct CMUnitTest tests[] = {
         cmocka_unit_test(test_create_has_256_base_byte_tokens),
@@ -229,6 +273,7 @@ int main(void) {
         cmocka_unit_test(test_encode_decode_longer_ascii_roundtrip),
         cmocka_unit_test(test_encode_decode_serbian_utf8_roundtrip),
         cmocka_unit_test(test_encode_is_deterministic),
+        cmocka_unit_test(test_train_classic_example),
     };
     return cmocka_run_group_tests(tests, NULL, NULL);
 }
