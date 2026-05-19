@@ -6,3 +6,8 @@ target_include_directories(text_parser PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # don't have to retrain every run.
 add_library(bpe tokenizer/bpe.c tokenizer/bpe_io.c)
 target_include_directories(bpe PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Data loader — loads a tokenized .bin file into RAM and hands out training
+# batches with shifted targets for next-token prediction.
+add_library(dataloader data/dataloader.c)
+target_include_directories(dataloader PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
