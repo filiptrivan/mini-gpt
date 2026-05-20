@@ -308,3 +308,34 @@ With ~270K parameters on a small Serbian text corpus:
 - Output will "look like" Serbian text at a glance (correct character distributions, common words)
 - Clear loss decrease during training = success
 - The value is in building the system, not output quality
+
+---
+
+## Known Limitations (alpha version)
+
+Explicit list of design trade-offs accepted for the seminar scope. Each is
+fine at our corpus size (a textbook, a few MB) and would warrant a follow-up
+if we scaled the input dramatically.
+
+- **BPE training is O(num_merges × seq_len).** `bpe_train` rescans the entire
+  working sequence with nested loops on every merge iteration. A production
+  tokenizer would maintain an incrementally-updated pair-count hash map.
+  See block comment on `bpe_train` in `src/tokenizer/bpe.c`.
+
+- **Text parser uses ~2× peak memory.** `text_parser_parse_file` keeps the
+  raw input buffer and the cleaned output buffer alive simultaneously.
+  Future improvement: in-place two-pointer cleaning over a single buffer
+  (cleaning only removes bytes, never adds — same compaction pattern as the
+  BPE merge step). See block comment on `text_parser_parse_file` in
+  `src/data/text_parser.c`.
+
+- **PDF extractor is a deliberately thin Python wrapper.** `tools/extract_pdf.py`
+  only calls PyPDF2's `extract_text()` and inserts `---PAGE N---` separators.
+  All cleaning lives in C. The seminar's learning goal is C/CUDA/MPI, not
+  Python data engineering; PyPDF2 also exposes no layout info, so a richer
+  extractor would require switching libraries. See the module docstring in
+  `tools/extract_pdf.py`.
+
+- **Data loader holds the entire token file in RAM.** `DataLoader` reads the
+  whole `.bin` once at init. Streaming from disk would be needed only for
+  corpora that don't fit in memory, which we don't have. See `docs/dataloader.md`.

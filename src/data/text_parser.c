@@ -217,6 +217,14 @@ static ParsedText *clean_text(const char *raw, size_t raw_len) {
  * Implementation: read the whole file into a heap buffer, hand it to
  * clean_text, then free the raw buffer (clean_text already produced its own
  * output buffer that lives inside the returned ParsedText).
+ *
+ * KNOWN LIMITATION (alpha version): peak memory is roughly 2 * file_size,
+ * because the raw input buffer and the cleaned output buffer both exist at
+ * the same time during clean_text. Acceptable for the seminar corpus (a
+ * textbook is a few MB; 2x is single-digit MB). A future improvement: since
+ * cleaning only ever REMOVES bytes (never adds), it could be done in place
+ * with a two-pointer read/write scheme over a single buffer — same pattern
+ * the BPE training already uses to compact merged pairs. Deferred.
  */
 ParsedText *text_parser_parse_file(const char *filepath) {
     /* "rb" = read, binary. Binary mode matters on Windows so '\n' isn't
