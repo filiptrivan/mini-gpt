@@ -129,6 +129,14 @@ void bpe_free(BPETokenizer *tok) {
  * If the corpus is too small to produce all requested merges (no pair
  * occurs more than once), training stops early and num_merges reflects
  * the actual count achieved.
+ *
+ * KNOWN LIMITATION (alpha version): pair counting is brute-force — every
+ * merge iteration re-scans the entire working sequence with nested loops.
+ * Total work is O(num_merges * seq_len), which is fine for the seminar
+ * corpus (a textbook, a few MB at most) but would be painful on a large
+ * corpus. A production version would maintain an incrementally-updated
+ * pair-count hash map, recomputing only counts affected by the chosen
+ * merge each iteration. Deferred — not needed at this scope.
  */
 void bpe_train(BPETokenizer *tok,
                const unsigned char *text,
