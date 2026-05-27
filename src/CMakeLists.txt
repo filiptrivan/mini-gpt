@@ -11,3 +11,9 @@ target_include_directories(bpe PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # batches with shifted targets for next-token prediction.
 add_library(dataloader data/dataloader.c)
 target_include_directories(dataloader PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Neural network layer ops (CPU) — matmul, layernorm, softmax, gelu,
+# residual, embedding. Same buffer-in / buffer-out style as the rest of
+# the project so the same logic mirrors easily to CUDA later.
+add_library(layers model/layers.c)
+target_include_directories(layers PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
