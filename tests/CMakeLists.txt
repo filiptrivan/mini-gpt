@@ -21,3 +21,9 @@ add_test(NAME test_bpe COMMAND test_bpe)
 add_executable(test_dataloader test_dataloader.c)
 target_link_libraries(test_dataloader dataloader ${CMOCKA_LIBRARIES})
 add_test(NAME test_dataloader COMMAND test_dataloader)
+
+# Layer op tests — one test per forward function (residual, gelu, matmul,
+# softmax, layernorm, embed).
+add_executable(test_layers test_layers.c)
+target_link_libraries(test_layers layers ${CMOCKA_LIBRARIES})
+add_test(NAME test_layers COMMAND test_layers)
