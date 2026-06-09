@@ -21,6 +21,11 @@
  * file in its setup and removes it at the end. */
 #define SYNTHETIC_PATH "/tmp/test_dataloader_synthetic.bin"
 
+/* Vocab size used for "valid file" tests. Our synthetic files contain
+ * tokens 0..n-1 for small n (max 20 in these tests), so 32 is a roomy
+ * upper bound that lets every existing token pass validation. */
+#define TEST_VOCAB_SIZE 32
+
 /*
  * write_synthetic_bin — create a .bin file containing the integers
  *                       0, 1, 2, ..., n-1 (each as one int).
@@ -58,7 +63,8 @@ static void test_init_rejects_missing_file(void **state) {
 
     DataLoader *loader = dataloader_init("/no/such/file.bin",
                                          /*batch_size=*/2,
-                                         /*seq_len=*/4);
+                                         /*seq_len=*/4,
+                                         /*vocab_size=*/TEST_VOCAB_SIZE);
     assert_null(loader);
 }
 
@@ -76,7 +82,46 @@ static void test_init_rejects_too_small_file(void **state) {
 
     DataLoader *loader = dataloader_init(SYNTHETIC_PATH,
                                          /*batch_size=*/2,
-                                         /*seq_len=*/4);
+                                         /*seq_len=*/4,
+                                         /*vocab_size=*/TEST_VOCAB_SIZE);
+    assert_null(loader);
+
+    remove(SYNTHETIC_PATH);
+}
+
+/*
+ * test_init_rejects_out_of_range_token — if even one token in the file
+ * is >= vocab_size (or negative), init must refuse with NULL. This is the
+ * boundary check that protects every downstream layer from indexing the
+ * embedding table out of bounds.
+ *
+ * We write 10 tokens: the first 9 are valid (0..8), the last one is the
+ * sentinel TEST_VOCAB_SIZE itself — exactly one past the legal range,
+ * which is the most common kind of bug (off-by-one in the tokenizer).
+ * Even though every other token is fine, the whole file must be rejected.
+ */
+static void test_init_rejects_out_of_range_token(void **state) {
+    (void)state;
+
+    /* Write 10 ints: 0,1,2,3,4,5,6,7,8, then a bad id. We don't reuse
+     * write_synthetic_bin because that one writes the strict 0..n-1
+     * sequence — here we need to plant a specific out-of-range value. */
+    FILE *f = fopen(SYNTHETIC_PATH, "wb");
+    assert_non_null(f);
+    for (int i = 0; i < 9; i++) {
+        assert_int_equal(fwrite(&i, sizeof(int), 1, f), 1);
+    }
+    int bad = TEST_VOCAB_SIZE;  /* exactly one past the legal upper bound */
+    assert_int_equal(fwrite(&bad, sizeof(int), 1, f), 1);
+    fclose(f);
+
+    /* B*T+1 = 2*4+1 = 9, and we wrote 10 tokens, so the file-size check
+     * would pass. The only thing that should reject this file is the
+     * token-range scan. */
+    DataLoader *loader = dataloader_init(SYNTHETIC_PATH,
+                                         /*batch_size=*/2,
+                                         /*seq_len=*/4,
+                                         /*vocab_size=*/TEST_VOCAB_SIZE);
     assert_null(loader);
 
     remove(SYNTHETIC_PATH);
@@ -97,7 +142,8 @@ static void test_init_loads_file_correctly(void **state) {
 
     DataLoader *loader = dataloader_init(SYNTHETIC_PATH,
                                          /*batch_size=*/2,
-                                         /*seq_len=*/4);
+                                         /*seq_len=*/4,
+                                         /*vocab_size=*/TEST_VOCAB_SIZE);
     assert_non_null(loader);
 
     assert_int_equal(loader->num_tokens, 20);
@@ -131,7 +177,7 @@ static void test_batch_shape_and_shift(void **state) {
     const int B = 2, T = 4;
 
     write_synthetic_bin(SYNTHETIC_PATH, 20);
-    DataLoader *loader = dataloader_init(SYNTHETIC_PATH, B, T);
+    DataLoader *loader = dataloader_init(SYNTHETIC_PATH, B, T, TEST_VOCAB_SIZE);
     assert_non_null(loader);
 
     /* Caller-owned buffers — the loader fills them, doesn't allocate them.
@@ -166,7 +212,7 @@ static void test_cursor_advances(void **state) {
     const int B = 2, T = 4;
 
     write_synthetic_bin(SYNTHETIC_PATH, 20);
-    DataLoader *loader = dataloader_init(SYNTHETIC_PATH, B, T);
+    DataLoader *loader = dataloader_init(SYNTHETIC_PATH, B, T, TEST_VOCAB_SIZE);
 
     int inputs[2 * 4];
     int targets[2 * 4];
@@ -207,7 +253,7 @@ static void test_wraparound_at_eof(void **state) {
     const int B = 2, T = 4;
 
     write_synthetic_bin(SYNTHETIC_PATH, 20);
-    DataLoader *loader = dataloader_init(SYNTHETIC_PATH, B, T);
+    DataLoader *loader = dataloader_init(SYNTHETIC_PATH, B, T, TEST_VOCAB_SIZE);
 
     int inputs[2 * 4];
     int targets[2 * 4];
@@ -243,6 +289,7 @@ int main(void) {
     const struct CMUnitTest tests[] = {
         cmocka_unit_test(test_init_rejects_missing_file),
         cmocka_unit_test(test_init_rejects_too_small_file),
+        cmocka_unit_test(test_init_rejects_out_of_range_token),
         cmocka_unit_test(test_init_loads_file_correctly),
         cmocka_unit_test(test_batch_shape_and_shift),
         cmocka_unit_test(test_cursor_advances),

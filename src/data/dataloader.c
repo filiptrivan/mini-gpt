@@ -16,6 +16,8 @@
 
 #include "data/dataloader.h"
 
+#include <assert.h>  /* assert() — runtime check in debug builds, no-op under -DNDEBUG */
+#include <stddef.h>  /* NULL */
 #include <stdio.h>   /* fopen, fclose, fread, fseek, ftell, SEEK_END, SEEK_SET */
 #include <stdlib.h>  /* malloc, free */
 
@@ -32,7 +34,16 @@
  *
  * Any failure along the way frees what we've allocated so far and returns NULL.
  */
-DataLoader *dataloader_init(const char *filepath, int batch_size, int seq_len) {
+DataLoader *dataloader_init(const char *filepath,
+                            int batch_size, int seq_len, int vocab_size) {
+    /* Programmer-contract preconditions. Bad arguments here mean the caller
+     * has a bug (e.g. forgot to pass vocab_size); a graceful NULL return
+     * would just hide that. Asserts compile out under -DNDEBUG. */
+    assert(filepath   != NULL);
+    assert(batch_size  > 0);
+    assert(seq_len     > 0);
+    assert(vocab_size  > 0);
+
     /* "rb" = read, binary mode. On Unix the 'b' is redundant; we keep it
      * for portability and to make intent explicit. */
     FILE *f = fopen(filepath, "rb");
@@ -94,6 +105,20 @@ DataLoader *dataloader_init(const char *filepath, int batch_size, int seq_len) {
     if (read != num_tokens) {
         free(tokens);
         return NULL;
+    }
+
+    /* Token-range validation — the ONE boundary check that protects every
+     * downstream layer (embed_forward, the loss, etc.) from out-of-range
+     * ids. We scan the whole file once; that's O(num_tokens), runs once
+     * per training run, and is cheap next to the file I/O above. After
+     * this loop, every consumer can index wte / wpe by id without
+     * re-checking. If even one id is bad, the whole file is rejected:
+     * a corrupt tokenizer output isn't something we can salvage. */
+    for (size_t i = 0; i < num_tokens; i++) {
+        if (tokens[i] < 0 || tokens[i] >= vocab_size) {
+            free(tokens);
+            return NULL;
+        }
     }
 
     /* Allocate the struct itself and populate it. We could put it on the
