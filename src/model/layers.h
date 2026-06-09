@@ -33,6 +33,11 @@
  * along one input is safe; partial overlap is undefined behavior). The
  * `const` on a and b promises this function will not modify them — a useful
  * contract both for the compiler (enables optimizations) and for the reader.
+ *
+ * Preconditions (enforced by assert() in debug builds, undefined behavior
+ * otherwise — callers must guarantee these):
+ *   - out, a, b are non-NULL
+ *   - N > 0
  */
 void residual_forward(float *out, const float *a, const float *b, int N);
 
@@ -58,6 +63,10 @@ void residual_forward(float *out, const float *a, const float *b, int N);
  *
  * In-place is safe: passing the same pointer for out and in works because
  * each output element depends only on the same-index input element.
+ *
+ * Preconditions:
+ *   - out, in are non-NULL
+ *   - N > 0
  */
 void gelu_forward(float *out, const float *in, int N);
 
@@ -89,6 +98,10 @@ void gelu_forward(float *out, const float *in, int N);
  * This is the simple O(M*N*K) triple-loop implementation. In Task 9 we'll
  * write a tiled CUDA version that's much faster on GPUs; the math here is
  * the reference output that the CUDA kernel will be compared against.
+ *
+ * Preconditions:
+ *   - out, a, b are non-NULL
+ *   - M > 0, K > 0, N > 0
  */
 void matmul_forward(float *out, const float *a, const float *b, int M, int K, int N);
 
@@ -117,6 +130,12 @@ void matmul_forward(float *out, const float *a, const float *b, int M, int K, in
  *
  * out and in must NOT alias. The implementation reads from in during the
  * same pass that writes to out, so overlap would corrupt later reads.
+ *
+ * Preconditions:
+ *   - out, in are non-NULL
+ *   - N > 0
+ *   - V > 0  (we read in_row[0] before the loop to seed max; an empty row
+ *     would access out-of-bounds memory)
  */
 void softmax_forward(float *out, const float *in, int N, int V);
 
@@ -143,6 +162,12 @@ void softmax_forward(float *out, const float *in, int N, int V);
  * row collapses to a single value, even momentarily.
  *
  * out must NOT alias in.
+ *
+ * Preconditions:
+ *   - out, in, gamma, beta are non-NULL
+ *   - N > 0
+ *   - C > 0  (the mean and variance computations divide by C; C == 0 would
+ *     produce NaN/Inf and silently poison the rest of the forward pass)
  */
 void layernorm_forward(float *out, const float *in,
                        const float *gamma, const float *beta,
@@ -173,6 +198,18 @@ void layernorm_forward(float *out, const float *in,
  * This is the FIRST operation in GPT's forward pass: it's what turns the
  * integer tokens produced by the BPE tokenizer into the float vectors
  * that everything downstream (layernorm, attention, matmul, ...) consumes.
+ *
+ * Preconditions:
+ *   - out, tokens, wte, wpe are non-NULL
+ *   - B > 0, T > 0, C > 0
+ *   - EVERY token id in `tokens` must satisfy 0 <= id < vocab_size.
+ *     We cannot assert this here because vocab_size is not passed in
+ *     (the function never iterates it — it only indexes into wte by id),
+ *     but an out-of-range id reads random memory at `wte + id*C` with no
+ *     warning, then poisons every downstream layer with garbage floats.
+ *     Validate token ids at the data-loader / tokenizer boundary.
+ *   - T must satisfy T <= max_seq_len (the row count of wpe), for the
+ *     same reason: we index wpe by t without bounds-checking.
  */
 void embed_forward(float *out, const int *tokens,
                    const float *wte, const float *wpe,

@@ -7,9 +7,25 @@
  * caller-provided buffers, so the same logic is easy to mirror in CUDA later.
  */
 
+#include <assert.h> /* assert() — compiles to a runtime check in debug builds, a no-op under -DNDEBUG */
 #include <math.h>   /* tanhf, expf, sqrtf — single-precision math from the C standard library */
+#include <stddef.h> /* NULL — defined here in C99 (also dragged in by stdio/stdlib, but we don't include those) */
 
 #include "layers.h"
+
+/*
+ * Why assert() everywhere instead of returning error codes:
+ *   - These functions sit on the hot path of every forward pass; a branch
+ *     per call would pile up.
+ *   - The preconditions (non-NULL pointers, positive dims) are programmer
+ *     contracts, not user input — they should never be violated by correct
+ *     code. assert() catches bugs during development and disappears in
+ *     -DNDEBUG release builds, which is exactly the trade we want.
+ *   - This matches the style the professor requested in PR #3 review:
+ *     "clearly check or document that pointers aren't NULL and dimensions
+ *     are greater than zero." The header docstrings carry the documentation
+ *     side; the asserts here carry the runtime check.
+ */
 
 /*
  * residual_forward — element-wise add: out[i] = a[i] + b[i]. See layers.h.
@@ -20,6 +36,11 @@
  * assign one GPU thread per i and run all N additions simultaneously.
  */
 void residual_forward(float *out, const float *a, const float *b, int N) {
+    assert(out != NULL);
+    assert(a   != NULL);
+    assert(b   != NULL);
+    assert(N    > 0);
+
     for (int i = 0; i < N; i++) {
         out[i] = a[i] + b[i];
     }
@@ -42,6 +63,10 @@ void residual_forward(float *out, const float *a, const float *b, int N) {
  * also uses single precision.
  */
 void gelu_forward(float *out, const float *in, int N) {
+    assert(out != NULL);
+    assert(in  != NULL);
+    assert(N    > 0);
+
     static const float SQRT_2_OVER_PI = 0.7978845608028654f; /* = sqrt(2/π) */
     static const float GELU_COEF      = 0.044715f;           /* magic constant from the GPT-2 paper */
 
@@ -83,6 +108,13 @@ void gelu_forward(float *out, const float *in, int N) {
  * arrange memory access so the hardware can stream data efficiently.
  */
 void matmul_forward(float *out, const float *a, const float *b, int M, int K, int N) {
+    assert(out != NULL);
+    assert(a   != NULL);
+    assert(b   != NULL);
+    assert(M    > 0);
+    assert(K    > 0);
+    assert(N    > 0);
+
     for (int i = 0; i < M; i++) {
         float       *out_row = out + i * N;   /* output row i */
         const float *a_row   = a   + i * K;   /* input row i of a — its k-th element is the scalar we broadcast below */
@@ -131,6 +163,11 @@ void matmul_forward(float *out, const float *a, const float *b, int M, int K, in
  * (one multiply hoisted out of the inner loops).
  */
 void softmax_forward(float *out, const float *in, int N, int V) {
+    assert(out != NULL);
+    assert(in  != NULL);
+    assert(N    > 0);
+    assert(V    > 0);  /* V == 0 would crash on the `in_row[0]` seed read below */
+
     for (int n = 0; n < N; n++) {
         const float *in_row = in  + n * V;   /* start of row n in `in`  */
         float       *out_row = out + n * V;  /* start of row n in `out` */
@@ -183,6 +220,13 @@ void softmax_forward(float *out, const float *in, int N, int V) {
 void layernorm_forward(float *out, const float *in,
                        const float *gamma, const float *beta,
                        int N, int C) {
+    assert(out   != NULL);
+    assert(in    != NULL);
+    assert(gamma != NULL);
+    assert(beta  != NULL);
+    assert(N      > 0);
+    assert(C      > 0);  /* mean = sum / C and var = sq_sum / C — C == 0 would NaN-poison the row */
+
     static const float EPS = 1e-5f;
 
     for (int n = 0; n < N; n++) {
@@ -238,6 +282,18 @@ void layernorm_forward(float *out, const float *in,
 void embed_forward(float *out, const int *tokens,
                    const float *wte, const float *wpe,
                    int B, int T, int C) {
+    assert(out    != NULL);
+    assert(tokens != NULL);
+    assert(wte    != NULL);
+    assert(wpe    != NULL);
+    assert(B       > 0);
+    assert(T       > 0);
+    assert(C       > 0);
+    /* NOTE: we cannot assert(tokens[i] < vocab_size) here — vocab_size is
+     * not a parameter of this function (see layers.h). An out-of-range
+     * token id silently reads garbage from wherever `wte + id*C` lands in
+     * memory. The data loader and tokenizer must guarantee valid ids. */
+
     for (int b = 0; b < B; b++) {
         for (int t = 0; t < T; t++) {
             /* Step 1: which token sits at this batch/position? */
