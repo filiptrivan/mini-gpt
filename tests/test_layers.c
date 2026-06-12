@@ -23,9 +23,11 @@
 #include <setjmp.h>
 #include <cmocka.h>
 
-#include <math.h>   /* expf, isfinite — used in softmax tests */
+#include <math.h>    /* expf, isfinite — used in softmax tests */
+#include <string.h>  /* memset — zero gradient buffers before backward */
 
 #include "model/layers.h"
+#include "test_utils.h"  /* numerical_gradient — backward-pass tests */
 
 /*
  * residual_forward: out[i] = a[i] + b[i] for every i in [0, N).
@@ -452,6 +454,553 @@ static void test_embed_multi_batch(void **state) {
     assert_float_equal(out[7], 44.0f, 1e-6);
 }
 
+/* ====================================================================== */
+/*                        BACKWARD PASS TESTS                             */
+/* ====================================================================== */
+
+/*
+ * Strategy used by every test below: the "loss-contraction" trick.
+ *
+ * Each forward op f(x) produces a vector (or tensor) output. We want to
+ * verify that its backward op computes dL/dx correctly — but dL/dx is
+ * only defined once we say what L is. We pick the simplest possible L:
+ *
+ *      L(x) = sum_k d_out[k] * f(x)[k]
+ *
+ * (a linear "contraction" of the forward output against a fixed,
+ * arbitrary upstream-gradient vector d_out). Two reasons this is
+ * exactly the right loss to use:
+ *
+ *   1. By the chain rule, dL/dx = (df/dx)^T @ d_out, which is precisely
+ *      what every backward function in layers.c is supposed to compute.
+ *      So the gradient of THIS particular L is the analytical backward.
+ *
+ *   2. L is a scalar function of x, so we can numerically estimate its
+ *      gradient with central differences via numerical_gradient — and
+ *      then compare element-wise to the analytical backward.
+ *
+ * If the analytical and numerical gradients agree to a few thousandths,
+ * the backward op is correct. If they disagree, the backward has a bug
+ * (wrong formula, wrong indexing, missing factor, etc.) — the numerical
+ * gradient is "ground truth" because it's computed only from the
+ * forward function we already tested above.
+ *
+ * Tolerance: we use 1e-3 for absolute differences. In float32 with
+ * h = 1e-3, the central-difference quotient has truncation error
+ * O(h^2) ~ 1e-6 PLUS round-off error ~ machine_epsilon/h ~ 1e-4.
+ * 1e-3 gives a comfortable margin without hiding real bugs (a wrong
+ * gradient is almost never within 1e-3; it's usually off by 50%+).
+ */
+
+/* ---- residual_backward ------------------------------------------------ */
+
+/*
+ * Context for the residual loss closure. We numerical-grad over `a`
+ * while holding `b` and `d_out` fixed (and vice versa). Storing them
+ * in a struct that we pass via `void *ctx` to numerical_gradient is
+ * the standard C idiom for closures.
+ */
+typedef struct {
+    const float *b;
+    const float *d_out;
+    int          N;
+    float       *out_buf;  /* scratch for forward output, lives in caller */
+} residual_loss_ctx_a_t;
+
+/* The mirror struct for sweeping over `b` instead of `a`. */
+typedef struct {
+    const float *a;
+    const float *d_out;
+    int          N;
+    float       *out_buf;
+} residual_loss_ctx_b_t;
+
+/* L(a) = sum_k d_out[k] * (a + b)[k] — `b` and `d_out` fixed via ctx. */
+static float residual_loss_a(const float *a, void *ctx_) {
+    residual_loss_ctx_a_t *ctx = (residual_loss_ctx_a_t *)ctx_;
+    residual_forward(ctx->out_buf, a, ctx->b, ctx->N);
+    float L = 0.0f;
+    for (int i = 0; i < ctx->N; i++) L += ctx->d_out[i] * ctx->out_buf[i];
+    return L;
+}
+
+/* L(b) = sum_k d_out[k] * (a + b)[k] — `a` and `d_out` fixed via ctx. */
+static float residual_loss_b(const float *b, void *ctx_) {
+    residual_loss_ctx_b_t *ctx = (residual_loss_ctx_b_t *)ctx_;
+    residual_forward(ctx->out_buf, ctx->a, b, ctx->N);
+    float L = 0.0f;
+    for (int i = 0; i < ctx->N; i++) L += ctx->d_out[i] * ctx->out_buf[i];
+    return L;
+}
+
+/*
+ * residual: analytical backward must equal d_out for both d_a and d_b,
+ * since ∂(a+b)/∂a = ∂(a+b)/∂b = 1. The numerical gradient confirms it
+ * the long way around. (Also a sanity check on the test helper itself —
+ * if numerical_gradient is broken, this test will fail loudly.)
+ */
+static void test_residual_backward(void **state) {
+    (void)state;
+
+    float a[4]     = { 1.0f,  2.0f, 3.0f,  4.0f};
+    float b[4]     = { 0.5f, -1.0f, 2.5f, -0.25f};
+    float d_out[4] = { 1.0f, -2.0f, 0.5f,  3.0f};
+
+    /* Analytical: zero d_a, d_b first since residual_backward accumulates. */
+    float d_a_ana[4], d_b_ana[4];
+    memset(d_a_ana, 0, sizeof(d_a_ana));
+    memset(d_b_ana, 0, sizeof(d_b_ana));
+    residual_backward(d_a_ana, d_b_ana, d_out, 4);
+
+    /* Numerical, sweeping `a` first then `b`. Each sweep uses a fresh
+     * out_buf so the loss function has somewhere to write. */
+    float out_buf[4];
+    float d_a_num[4], d_b_num[4];
+
+    float a_copy[4]; memcpy(a_copy, a, sizeof(a));
+    residual_loss_ctx_a_t ctx_a = {.b = b, .d_out = d_out, .N = 4, .out_buf = out_buf};
+    numerical_gradient(d_a_num, residual_loss_a, a_copy, 4, &ctx_a, 1e-3f);
+
+    float b_copy[4]; memcpy(b_copy, b, sizeof(b));
+    residual_loss_ctx_b_t ctx_b = {.a = a, .d_out = d_out, .N = 4, .out_buf = out_buf};
+    numerical_gradient(d_b_num, residual_loss_b, b_copy, 4, &ctx_b, 1e-3f);
+
+    for (int i = 0; i < 4; i++) {
+        assert_float_equal(d_a_ana[i], d_a_num[i], 1e-3);
+        assert_float_equal(d_b_ana[i], d_b_num[i], 1e-3);
+        /* Analytical sanity: d_a must literally equal d_out. */
+        assert_float_equal(d_a_ana[i], d_out[i], 1e-6);
+        assert_float_equal(d_b_ana[i], d_out[i], 1e-6);
+    }
+}
+
+/*
+ * residual: a second call to backward without zeroing the dest buffer
+ * must DOUBLE the gradient. This nails the `+=` accumulation convention
+ * down explicitly so any future refactor that switches to `=` fails here.
+ */
+static void test_residual_backward_accumulates(void **state) {
+    (void)state;
+
+    float d_out[3] = {1.0f, 2.0f, 3.0f};
+    float d_a[3]   = {0.0f, 0.0f, 0.0f};
+    float d_b[3]   = {0.0f, 0.0f, 0.0f};
+
+    residual_backward(d_a, d_b, d_out, 3);
+    residual_backward(d_a, d_b, d_out, 3);
+
+    /* After two calls: each entry should be 2 * d_out[i]. */
+    assert_float_equal(d_a[0], 2.0f, 1e-6);
+    assert_float_equal(d_a[1], 4.0f, 1e-6);
+    assert_float_equal(d_a[2], 6.0f, 1e-6);
+    assert_float_equal(d_b[0], 2.0f, 1e-6);
+    assert_float_equal(d_b[1], 4.0f, 1e-6);
+    assert_float_equal(d_b[2], 6.0f, 1e-6);
+}
+
+/* ---- gelu_backward ---------------------------------------------------- */
+
+typedef struct {
+    const float *d_out;
+    int          N;
+    float       *out_buf;
+} gelu_loss_ctx_t;
+
+static float gelu_loss(const float *in, void *ctx_) {
+    gelu_loss_ctx_t *ctx = (gelu_loss_ctx_t *)ctx_;
+    gelu_forward(ctx->out_buf, in, ctx->N);
+    float L = 0.0f;
+    for (int i = 0; i < ctx->N; i++) L += ctx->d_out[i] * ctx->out_buf[i];
+    return L;
+}
+
+/*
+ * gelu: the derivative is a non-trivial polynomial-times-sech^2 expression,
+ * so this is a real test of the formula, not just bookkeeping. Inputs
+ * cover the interesting regions: negative (where gelu has a small bump),
+ * zero (saddle), and positive (linear regime).
+ */
+static void test_gelu_backward(void **state) {
+    (void)state;
+
+    float in[4]    = {-1.0f, -0.3f, 0.3f, 1.5f};
+    float d_out[4] = { 0.7f,  1.0f, -0.5f, 2.0f};
+
+    float d_in_ana[4];
+    memset(d_in_ana, 0, sizeof(d_in_ana));
+    gelu_backward(d_in_ana, d_out, in, 4);
+
+    float out_buf[4];
+    float d_in_num[4];
+    float in_copy[4]; memcpy(in_copy, in, sizeof(in));
+    gelu_loss_ctx_t ctx = {.d_out = d_out, .N = 4, .out_buf = out_buf};
+    numerical_gradient(d_in_num, gelu_loss, in_copy, 4, &ctx, 1e-3f);
+
+    for (int i = 0; i < 4; i++) {
+        assert_float_equal(d_in_ana[i], d_in_num[i], 1e-3);
+    }
+}
+
+/* ---- matmul_backward -------------------------------------------------- */
+
+typedef struct {
+    const float *b;
+    const float *d_out;
+    int          M, K, N;
+    float       *out_buf;
+} matmul_loss_a_ctx_t;
+
+typedef struct {
+    const float *a;
+    const float *d_out;
+    int          M, K, N;
+    float       *out_buf;
+} matmul_loss_b_ctx_t;
+
+/* L(a) = sum_ij d_out[i,j] * (a @ b)[i,j], b fixed. */
+static float matmul_loss_a(const float *a, void *ctx_) {
+    matmul_loss_a_ctx_t *ctx = (matmul_loss_a_ctx_t *)ctx_;
+    matmul_forward(ctx->out_buf, a, ctx->b, ctx->M, ctx->K, ctx->N);
+    int total = ctx->M * ctx->N;
+    float L = 0.0f;
+    for (int i = 0; i < total; i++) L += ctx->d_out[i] * ctx->out_buf[i];
+    return L;
+}
+
+/* L(b) = sum_ij d_out[i,j] * (a @ b)[i,j], a fixed. */
+static float matmul_loss_b(const float *b, void *ctx_) {
+    matmul_loss_b_ctx_t *ctx = (matmul_loss_b_ctx_t *)ctx_;
+    matmul_forward(ctx->out_buf, ctx->a, b, ctx->M, ctx->K, ctx->N);
+    int total = ctx->M * ctx->N;
+    float L = 0.0f;
+    for (int i = 0; i < total; i++) L += ctx->d_out[i] * ctx->out_buf[i];
+    return L;
+}
+
+/*
+ * matmul: distinct M=2, K=3, N=2 catches "accidentally uses same dim
+ * everywhere" bugs in both the forward (already tested) and the
+ * d_a = d_out @ b^T / d_b = a^T @ d_out backward formulas.
+ */
+static void test_matmul_backward(void **state) {
+    (void)state;
+
+    /* a: M×K = 2×3, b: K×N = 3×2, out: M×N = 2×2. */
+    float a[6]     = { 0.5f, -0.3f, 1.2f,
+                       0.1f,  0.8f, -0.4f};
+    float b[6]     = { 1.0f, -0.5f,
+                      -0.2f,  0.7f,
+                       0.3f,  0.1f};
+    float d_out[4] = { 1.0f, -2.0f,
+                       0.5f,  1.5f};
+
+    float d_a_ana[6], d_b_ana[6];
+    memset(d_a_ana, 0, sizeof(d_a_ana));
+    memset(d_b_ana, 0, sizeof(d_b_ana));
+    matmul_backward(d_a_ana, d_b_ana, d_out, a, b, 2, 3, 2);
+
+    float out_buf[4];
+
+    float a_copy[6]; memcpy(a_copy, a, sizeof(a));
+    matmul_loss_a_ctx_t ctx_a = {.b = b, .d_out = d_out, .M = 2, .K = 3, .N = 2, .out_buf = out_buf};
+    float d_a_num[6];
+    numerical_gradient(d_a_num, matmul_loss_a, a_copy, 6, &ctx_a, 1e-3f);
+
+    float b_copy[6]; memcpy(b_copy, b, sizeof(b));
+    matmul_loss_b_ctx_t ctx_b = {.a = a, .d_out = d_out, .M = 2, .K = 3, .N = 2, .out_buf = out_buf};
+    float d_b_num[6];
+    numerical_gradient(d_b_num, matmul_loss_b, b_copy, 6, &ctx_b, 1e-3f);
+
+    for (int i = 0; i < 6; i++) {
+        assert_float_equal(d_a_ana[i], d_a_num[i], 1e-3);
+        assert_float_equal(d_b_ana[i], d_b_num[i], 1e-3);
+    }
+}
+
+/* ---- softmax_backward ------------------------------------------------- */
+
+typedef struct {
+    const float *d_out;
+    int          N, V;
+    float       *out_buf;
+} softmax_loss_ctx_t;
+
+static float softmax_loss(const float *in, void *ctx_) {
+    softmax_loss_ctx_t *ctx = (softmax_loss_ctx_t *)ctx_;
+    softmax_forward(ctx->out_buf, in, ctx->N, ctx->V);
+    int total = ctx->N * ctx->V;
+    float L = 0.0f;
+    for (int i = 0; i < total; i++) L += ctx->d_out[i] * ctx->out_buf[i];
+    return L;
+}
+
+/*
+ * softmax: multi-row (N=2) so a bug that swaps N and V in the backward
+ * loop indexing or that mixes rows together would be caught here.
+ * Mixed-sign d_out makes sure the (d_out - row_sum * y) trick correctly
+ * subtracts; if it didn't, the test would systematically fail.
+ */
+static void test_softmax_backward(void **state) {
+    (void)state;
+
+    /* N=2 rows × V=4 cols. */
+    float in[8]    = { 0.5f, -1.0f, 2.0f, 0.3f,
+                      -0.7f,  1.2f, 0.0f, 0.4f};
+    float d_out[8] = { 1.0f, -0.5f, 2.0f, -1.0f,
+                       0.3f,  0.7f, -1.2f, 0.5f};
+
+    /* Forward to get y, which softmax_backward needs. */
+    float out_fwd[8];
+    softmax_forward(out_fwd, in, 2, 4);
+
+    float d_in_ana[8];
+    memset(d_in_ana, 0, sizeof(d_in_ana));
+    softmax_backward(d_in_ana, d_out, out_fwd, 2, 4);
+
+    float out_buf[8];
+    float d_in_num[8];
+    float in_copy[8]; memcpy(in_copy, in, sizeof(in));
+    softmax_loss_ctx_t ctx = {.d_out = d_out, .N = 2, .V = 4, .out_buf = out_buf};
+    numerical_gradient(d_in_num, softmax_loss, in_copy, 8, &ctx, 1e-3f);
+
+    for (int i = 0; i < 8; i++) {
+        assert_float_equal(d_in_ana[i], d_in_num[i], 1e-3);
+    }
+}
+
+/* ---- layernorm_backward ----------------------------------------------- */
+
+typedef struct {
+    const float *gamma;
+    const float *beta;
+    const float *d_out;
+    int          N, C;
+    float       *out_buf;
+} layernorm_loss_in_ctx_t;
+
+typedef struct {
+    const float *in;
+    const float *beta;
+    const float *d_out;
+    int          N, C;
+    float       *out_buf;
+} layernorm_loss_gamma_ctx_t;
+
+typedef struct {
+    const float *in;
+    const float *gamma;
+    const float *d_out;
+    int          N, C;
+    float       *out_buf;
+} layernorm_loss_beta_ctx_t;
+
+static float layernorm_loss_in(const float *in, void *ctx_) {
+    layernorm_loss_in_ctx_t *ctx = (layernorm_loss_in_ctx_t *)ctx_;
+    layernorm_forward(ctx->out_buf, in, ctx->gamma, ctx->beta, ctx->N, ctx->C);
+    int total = ctx->N * ctx->C;
+    float L = 0.0f;
+    for (int i = 0; i < total; i++) L += ctx->d_out[i] * ctx->out_buf[i];
+    return L;
+}
+
+static float layernorm_loss_gamma(const float *gamma, void *ctx_) {
+    layernorm_loss_gamma_ctx_t *ctx = (layernorm_loss_gamma_ctx_t *)ctx_;
+    layernorm_forward(ctx->out_buf, ctx->in, gamma, ctx->beta, ctx->N, ctx->C);
+    int total = ctx->N * ctx->C;
+    float L = 0.0f;
+    for (int i = 0; i < total; i++) L += ctx->d_out[i] * ctx->out_buf[i];
+    return L;
+}
+
+static float layernorm_loss_beta(const float *beta, void *ctx_) {
+    layernorm_loss_beta_ctx_t *ctx = (layernorm_loss_beta_ctx_t *)ctx_;
+    layernorm_forward(ctx->out_buf, ctx->in, ctx->gamma, beta, ctx->N, ctx->C);
+    int total = ctx->N * ctx->C;
+    float L = 0.0f;
+    for (int i = 0; i < total; i++) L += ctx->d_out[i] * ctx->out_buf[i];
+    return L;
+}
+
+/*
+ * layernorm: the headline test — three numerical sweeps (in, gamma, beta)
+ * vs. the full layernorm_backward. N=2 rows so we also exercise the
+ * "sum across rows" reduction in d_gamma and d_beta. C=4 features.
+ * The input is non-trivial (mixed signs, non-unit variance) so a bug
+ * that drops the mean-subtraction or the projection term in the input
+ * gradient formula would clearly show.
+ */
+static void test_layernorm_backward(void **state) {
+    (void)state;
+
+    int N = 2, C = 4;
+    float in[8]    = { 1.0f, -0.5f, 2.0f, 0.3f,
+                      -1.0f,  0.7f, 0.5f, -0.2f};
+    float gamma[4] = { 1.0f,  0.5f, 2.0f, 0.8f};
+    float beta[4]  = { 0.0f,  0.3f, -0.2f, 0.1f};
+    float d_out[8] = { 1.0f, -2.0f, 0.5f, 0.3f,
+                      -0.5f,  1.0f, 1.2f, -1.0f};
+
+    /* Analytical: zero all three grad buffers first. */
+    float d_in_ana[8], d_gamma_ana[4], d_beta_ana[4];
+    memset(d_in_ana,    0, sizeof(d_in_ana));
+    memset(d_gamma_ana, 0, sizeof(d_gamma_ana));
+    memset(d_beta_ana,  0, sizeof(d_beta_ana));
+    layernorm_backward(d_in_ana, d_gamma_ana, d_beta_ana,
+                       d_out, in, gamma, N, C);
+
+    float out_buf[8];
+
+    /* d_in numerical sweep */
+    float in_copy[8]; memcpy(in_copy, in, sizeof(in));
+    layernorm_loss_in_ctx_t ctx_in = {
+        .gamma = gamma, .beta = beta, .d_out = d_out,
+        .N = N, .C = C, .out_buf = out_buf,
+    };
+    float d_in_num[8];
+    numerical_gradient(d_in_num, layernorm_loss_in, in_copy, 8, &ctx_in, 1e-3f);
+
+    /* d_gamma numerical sweep */
+    float gamma_copy[4]; memcpy(gamma_copy, gamma, sizeof(gamma));
+    layernorm_loss_gamma_ctx_t ctx_gamma = {
+        .in = in, .beta = beta, .d_out = d_out,
+        .N = N, .C = C, .out_buf = out_buf,
+    };
+    float d_gamma_num[4];
+    numerical_gradient(d_gamma_num, layernorm_loss_gamma, gamma_copy, 4, &ctx_gamma, 1e-3f);
+
+    /* d_beta numerical sweep */
+    float beta_copy[4]; memcpy(beta_copy, beta, sizeof(beta));
+    layernorm_loss_beta_ctx_t ctx_beta = {
+        .in = in, .gamma = gamma, .d_out = d_out,
+        .N = N, .C = C, .out_buf = out_buf,
+    };
+    float d_beta_num[4];
+    numerical_gradient(d_beta_num, layernorm_loss_beta, beta_copy, 4, &ctx_beta, 1e-3f);
+
+    for (int i = 0; i < 8; i++) {
+        assert_float_equal(d_in_ana[i], d_in_num[i], 1e-3);
+    }
+    for (int i = 0; i < 4; i++) {
+        assert_float_equal(d_gamma_ana[i], d_gamma_num[i], 1e-3);
+        assert_float_equal(d_beta_ana[i],  d_beta_num[i],  1e-3);
+    }
+}
+
+/* ---- embed_backward --------------------------------------------------- */
+
+typedef struct {
+    const int   *tokens;
+    const float *wpe;
+    const float *d_out;
+    int          B, T, C;
+    float       *out_buf;
+} embed_loss_wte_ctx_t;
+
+typedef struct {
+    const int   *tokens;
+    const float *wte;
+    const float *d_out;
+    int          B, T, C;
+    float       *out_buf;
+} embed_loss_wpe_ctx_t;
+
+static float embed_loss_wte(const float *wte, void *ctx_) {
+    embed_loss_wte_ctx_t *ctx = (embed_loss_wte_ctx_t *)ctx_;
+    embed_forward(ctx->out_buf, ctx->tokens, wte, ctx->wpe, ctx->B, ctx->T, ctx->C);
+    int total = ctx->B * ctx->T * ctx->C;
+    float L = 0.0f;
+    for (int i = 0; i < total; i++) L += ctx->d_out[i] * ctx->out_buf[i];
+    return L;
+}
+
+static float embed_loss_wpe(const float *wpe, void *ctx_) {
+    embed_loss_wpe_ctx_t *ctx = (embed_loss_wpe_ctx_t *)ctx_;
+    embed_forward(ctx->out_buf, ctx->tokens, ctx->wte, wpe, ctx->B, ctx->T, ctx->C);
+    int total = ctx->B * ctx->T * ctx->C;
+    float L = 0.0f;
+    for (int i = 0; i < total; i++) L += ctx->d_out[i] * ctx->out_buf[i];
+    return L;
+}
+
+/*
+ * embed: the key thing to verify is that a SHARED token id (token 1
+ * appears twice — at (b=0,t=1) and (b=1,t=0)) accumulates both
+ * contributions into the same wte row. A `=` (overwrite) implementation
+ * would lose one of them; this test catches that exact bug.
+ *
+ * Dimensions: B=2, T=2, C=3, vocab_size=4, max_seq_len=2 (= T).
+ */
+static void test_embed_backward(void **state) {
+    (void)state;
+
+    int B = 2, T = 2, C = 3;
+    int vocab_size = 4;
+    int max_seq_len = 2;
+
+    /* tokens[b*T + t] — token 1 appears twice (at (0,1) and (1,0)),
+     * so d_wte[1] must accumulate contributions from BOTH positions. */
+    int tokens[4] = {2, 1,
+                     1, 3};
+
+    float wte[12] = { 0.10f,  0.20f,  0.30f,   /* row 0 */
+                     -0.10f, -0.20f, -0.30f,   /* row 1 */
+                      0.50f,  0.40f,  0.30f,   /* row 2 */
+                      0.05f, -0.05f,  0.15f};  /* row 3 */
+
+    float wpe[6]  = { 0.01f, -0.02f, 0.03f,    /* pos 0 */
+                      0.04f,  0.05f, -0.06f};  /* pos 1 */
+
+    /* d_out shape B*T*C = 12. */
+    float d_out[12] = {
+         1.0f, -0.5f,  2.0f,   /* (b=0, t=0) */
+         0.3f,  1.2f, -0.7f,   /* (b=0, t=1) */
+        -1.0f,  0.4f,  0.8f,   /* (b=1, t=0) */
+         0.6f, -1.5f,  0.2f,   /* (b=1, t=1) */
+    };
+
+    /* Analytical backward. */
+    float d_wte_ana[12], d_wpe_ana[6];
+    memset(d_wte_ana, 0, sizeof(d_wte_ana));
+    memset(d_wpe_ana, 0, sizeof(d_wpe_ana));
+    embed_backward(d_wte_ana, d_wpe_ana, d_out, tokens, B, T, C);
+
+    float out_buf[12];
+
+    /* d_wte numerical sweep — total wte entries = vocab_size * C = 12. */
+    float wte_copy[12]; memcpy(wte_copy, wte, sizeof(wte));
+    embed_loss_wte_ctx_t ctx_wte = {
+        .tokens = tokens, .wpe = wpe, .d_out = d_out,
+        .B = B, .T = T, .C = C, .out_buf = out_buf,
+    };
+    float d_wte_num[12];
+    numerical_gradient(d_wte_num, embed_loss_wte, wte_copy, vocab_size * C, &ctx_wte, 1e-3f);
+
+    /* d_wpe numerical sweep — max_seq_len * C = 6 entries. */
+    float wpe_copy[6]; memcpy(wpe_copy, wpe, sizeof(wpe));
+    embed_loss_wpe_ctx_t ctx_wpe = {
+        .tokens = tokens, .wte = wte, .d_out = d_out,
+        .B = B, .T = T, .C = C, .out_buf = out_buf,
+    };
+    float d_wpe_num[6];
+    numerical_gradient(d_wpe_num, embed_loss_wpe, wpe_copy, max_seq_len * C, &ctx_wpe, 1e-3f);
+
+    for (int i = 0; i < vocab_size * C; i++) {
+        assert_float_equal(d_wte_ana[i], d_wte_num[i], 1e-3);
+    }
+    for (int i = 0; i < max_seq_len * C; i++) {
+        assert_float_equal(d_wpe_ana[i], d_wpe_num[i], 1e-3);
+    }
+
+    /* Extra sanity: row 1 of d_wte must equal d_out at (0,1) + d_out at (1,0),
+     * because token 1 appears at both positions and embed_backward must +=. */
+    float expected_d_wte_row1_c0 = d_out[0*T*C + 1*C + 0] + d_out[1*T*C + 0*C + 0];
+    float expected_d_wte_row1_c1 = d_out[0*T*C + 1*C + 1] + d_out[1*T*C + 0*C + 1];
+    float expected_d_wte_row1_c2 = d_out[0*T*C + 1*C + 2] + d_out[1*T*C + 0*C + 2];
+    assert_float_equal(d_wte_ana[1*C + 0], expected_d_wte_row1_c0, 1e-6);
+    assert_float_equal(d_wte_ana[1*C + 1], expected_d_wte_row1_c1, 1e-6);
+    assert_float_equal(d_wte_ana[1*C + 2], expected_d_wte_row1_c2, 1e-6);
+}
+
 /*
  * main — the test runner entry point.
  *
@@ -476,6 +1025,16 @@ int main(void) {
         cmocka_unit_test(test_layernorm_constant_row_safety),
         cmocka_unit_test(test_embed_single_batch),
         cmocka_unit_test(test_embed_multi_batch),
+
+        /* Backward-pass tests (Task 6). Each compares the analytical
+         * backward against a central-difference numerical gradient. */
+        cmocka_unit_test(test_residual_backward),
+        cmocka_unit_test(test_residual_backward_accumulates),
+        cmocka_unit_test(test_gelu_backward),
+        cmocka_unit_test(test_matmul_backward),
+        cmocka_unit_test(test_softmax_backward),
+        cmocka_unit_test(test_layernorm_backward),
+        cmocka_unit_test(test_embed_backward),
     };
     return cmocka_run_group_tests(tests, NULL, NULL);
 }

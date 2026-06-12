@@ -1,6 +1,12 @@
 include_directories(${CMOCKA_INCLUDE_DIRS})
 link_directories(${CMOCKA_LIBRARY_DIRS})
 
+# Shared test helpers (numerical_gradient, etc). Tests that need these
+# link against test_utils and #include "test_utils.h" — the helpers/
+# directory is exported PUBLIC on this target so the prefix is implicit.
+add_library(test_utils helpers/test_utils.c)
+target_include_directories(test_utils PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/helpers)
+
 add_executable(test_hello test_hello.c)
 target_link_libraries(test_hello ${CMOCKA_LIBRARIES})
 add_test(NAME test_hello COMMAND test_hello)
@@ -25,5 +31,5 @@ add_test(NAME test_dataloader COMMAND test_dataloader)
 # Layer op tests — one test per forward function (residual, gelu, matmul,
 # softmax, layernorm, embed).
 add_executable(test_layers test_layers.c)
-target_link_libraries(test_layers layers ${CMOCKA_LIBRARIES})
+target_link_libraries(test_layers layers test_utils ${CMOCKA_LIBRARIES})
 add_test(NAME test_layers COMMAND test_layers)

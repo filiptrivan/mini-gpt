@@ -2,7 +2,7 @@
 #define LAYERS_H
 
 /*
- * Neural network layer operations — CPU forward pass.
+ * Neural network layer operations — CPU forward and backward passes.
  *
  * Every function here takes raw float arrays (no fancy tensor objects) and
  * writes into a caller-owned `out` buffer. The caller is always responsible
@@ -10,8 +10,24 @@
  * functions; that keeps the math code small and predictable, and lets the
  * training loop reuse buffers across steps to avoid heap churn.
  *
- * Naming convention: `<op>_forward` for the forward pass.
- * Backward passes (`<op>_backward`) come in Task 6.
+ * Naming convention: `<op>_forward` for the forward pass, `<op>_backward`
+ * for the backward (gradient) pass.
+ *
+ * Backward-pass convention — IMPORTANT, this affects every caller:
+ *   All `_backward` functions ACCUMULATE into their gradient outputs with
+ *   `+=`, they do NOT overwrite. The caller MUST zero the gradient buffers
+ *   exactly once at the start of a training step. The reason: in a real
+ *   transformer the same tensor is reused on multiple paths (residual
+ *   connections fan a single gradient into two inputs; the same parameter
+ *   matrix is touched by every batch element; one embedding row receives
+ *   gradients from every position where that token appears). With `+=`
+ *   semantics the caller writes the same one-liner for every layer; with
+ *   `=` semantics we would need a wrapping `+=` at every call site, which
+ *   is error-prone. This matches the convention used in Karpathy's llm.c
+ *   and every well-written hand-rolled C reference implementation.
+ *
+ *   Tests must zero each gradient buffer before calling backward, OR
+ *   pre-fill it with a known value if testing the accumulation property.
  */
 
 /*
@@ -214,5 +230,288 @@ void layernorm_forward(float *out, const float *in,
 void embed_forward(float *out, const int *tokens,
                    const float *wte, const float *wpe,
                    int B, int T, int C);
+
+/* ====================================================================== */
+/*                          BACKWARD PASS                                 */
+/* ====================================================================== */
+
+/*
+ * residual_backward — gradient of out = a + b w.r.t. its two inputs.
+ *
+ * The derivative of an element-wise sum is trivial: ∂out[i]/∂a[i] = 1
+ * and ∂out[i]/∂b[i] = 1, with zero off-diagonals. By the chain rule,
+ *   dL/da[i] = dL/dout[i] * 1 = dL/dout[i]
+ *   dL/db[i] = dL/dout[i] * 1 = dL/dout[i]
+ *
+ * So a residual_backward just copies d_out into both d_a and d_b (with
+ * the `+=` accumulation described in the file-level note above).
+ *
+ * This is the math fact that makes residual connections so important
+ * during training: gradients flow through them unchanged. Without the
+ * skip path, gradient magnitudes shrink (or explode) layer by layer
+ * and deep networks become untrainable.
+ *
+ * Parameters:
+ *   d_a   — destination buffer, length N. Will receive d_out added in.
+ *   d_b   — destination buffer, length N. Will receive d_out added in.
+ *   d_out — gradient flowing in from downstream, length N. Not modified.
+ *   N     — number of elements.
+ *
+ * Aliasing: d_a, d_b, d_out must NOT overlap each other. Each one is a
+ * separate gradient buffer in the caller; the math assumes they're
+ * independent. (Specifically, d_a == d_b would double-count d_out, and
+ * d_out == d_a would read its own freshly-written values mid-loop.)
+ *
+ * Preconditions:
+ *   - d_a, d_b, d_out are non-NULL
+ *   - N > 0
+ *   - d_a and d_b have been zeroed (or pre-set) by the caller, since
+ *     we accumulate with += per the file-level convention.
+ */
+void residual_backward(float *d_a, float *d_b, const float *d_out, int N);
+
+/*
+ * gelu_backward — element-wise derivative of the tanh-approx GELU.
+ *
+ * Let s = sqrt(2/π) * (x + 0.044715 * x^3). Then
+ *   gelu(x) = 0.5 * x * (1 + tanh(s))
+ *
+ * Differentiating w.r.t. x (product rule + chain rule on tanh):
+ *   gelu'(x) = 0.5 * (1 + tanh(s))
+ *            + 0.5 * x * (1 - tanh(s)^2) * sqrt(2/π) * (1 + 3 * 0.044715 * x^2)
+ *
+ * The two pieces come from differentiating the two factors of
+ * (0.5 * x) * (1 + tanh(s)): the first piece is the product rule's
+ * "leave the second factor alone, derive the first"; the second piece is
+ * "leave the first alone, derive the second" — which means chain-ruling
+ * through tanh (giving sech^2 = 1 - tanh^2) and then through the inner
+ * polynomial s(x).
+ *
+ * By the chain rule from downstream loss L:
+ *   dL/dx[i] = dL/dout[i] * gelu'(in[i])
+ *
+ * Note we need the ORIGINAL `in` (not `out`) here — the derivative is a
+ * function of x, not gelu(x). The caller must keep the forward input
+ * around until backward runs. That's why every forward pass in a
+ * training loop caches its inputs.
+ *
+ * Parameters:
+ *   d_in  — destination buffer, length N. Accumulated with +=.
+ *   d_out — gradient from downstream, length N. Not modified.
+ *   in    — original forward input, length N. Not modified.
+ *   N     — element count.
+ *
+ * In-place is NOT safe here: this op reads in[i] to compute the local
+ * derivative but writes into d_in[i]. They are separate buffers in any
+ * sane caller, but if you somehow aliased d_in == in you'd corrupt the
+ * upstream forward cache. d_in == d_out is also unsafe — the `+=`
+ * conflates the accumulated gradient with the downstream gradient
+ * (each iteration both reads d_out[i] and increments d_in[i] at the
+ * same address, so the read picks up earlier writes instead of the
+ * caller's downstream value).
+ *
+ * Preconditions:
+ *   - d_in, d_out, in are non-NULL
+ *   - N > 0
+ *   - d_in has been zeroed (or pre-set) by the caller.
+ */
+void gelu_backward(float *d_in, const float *d_out, const float *in, int N);
+
+/*
+ * matmul_backward — gradient of out = a @ b w.r.t. a and b.
+ *
+ * Forward shapes (row-major flat arrays):
+ *   a   : M × K       b   : K × N       out : M × N
+ *
+ * Differentiating out[i,j] = sum_k a[i,k] * b[k,j] gives:
+ *   d_a[i,k] = sum_j  d_out[i,j] * b[k,j]      ← d_out @ b^T  (shape M × K)
+ *   d_b[k,j] = sum_i  a[i,k]    * d_out[i,j]   ← a^T @ d_out  (shape K × N)
+ *
+ * Mnemonic: in the forward, the dimension K is "summed over" (it's the
+ * shared dimension). In each backward, a DIFFERENT dimension becomes
+ * the shared one — j for d_a, i for d_b. The two halves are independent;
+ * neither needs the other's output to compute its own.
+ *
+ * Why we need a and b separately: each input grad needs the OTHER input
+ * (the partial derivative of a product wrt one factor is the other
+ * factor). So forward inputs must be cached for backward — same general
+ * pattern as gelu_backward needing the forward `in`.
+ *
+ * Parameters:
+ *   d_a   — destination buffer of length M*K. Accumulated with +=.
+ *   d_b   — destination buffer of length K*N. Accumulated with +=.
+ *   d_out — downstream gradient of length M*N. Not modified.
+ *   a     — original forward `a`, length M*K. Not modified.
+ *   b     — original forward `b`, length K*N. Not modified.
+ *   M, K, N — same dimensions as the forward call.
+ *
+ * Aliasing: each of {d_a, d_b, d_out, a, b} must be a distinct buffer.
+ *
+ * Preconditions:
+ *   - d_a, d_b, d_out, a, b are non-NULL
+ *   - M > 0, K > 0, N > 0
+ *   - d_a and d_b have been zeroed (or pre-set) by the caller.
+ */
+void matmul_backward(float *d_a, float *d_b,
+                     const float *d_out, const float *a, const float *b,
+                     int M, int K, int N);
+
+/*
+ * softmax_backward — Jacobian-vector product through row-wise softmax.
+ *
+ * Forward shapes (row-major):
+ *   in, out : N rows × V cols
+ *
+ * For one row, let y = softmax(x). Then
+ *   ∂y[j]/∂x[i] = y[i] * (δ_ij - y[j])
+ *
+ * Chain rule:
+ *   d_in[i] = sum_j d_out[j] * ∂y[j]/∂x[i]
+ *           = sum_j d_out[j] * y[i] * (δ_ij - y[j])
+ *           = y[i] * d_out[i]  -  y[i] * sum_j d_out[j] * y[j]
+ *           = y[i] * ( d_out[i] - sum_j d_out[j] * y[j] )
+ *
+ * The factored form on the last line is what we implement: O(V) per row
+ * vs. the naive double-sum which would be O(V^2). The trick that makes
+ * this efficient is that the sum_j term doesn't depend on i, so we
+ * compute it once per row and reuse it across all V outputs.
+ *
+ * Note: we take `out` (the forward output y), NOT the forward input x.
+ * Once you have y, the input is no longer needed for the gradient.
+ * Caching y is cheaper than recomputing the softmax from x.
+ *
+ * Parameters:
+ *   d_in  — destination, N*V floats. Accumulated with +=.
+ *   d_out — downstream gradient, N*V floats. Not modified.
+ *   out   — cached forward output (y), N*V floats. Not modified.
+ *   N, V  — same as the forward call.
+ *
+ * Aliasing: d_in must not overlap d_out or out (we read both during the
+ * write to d_in). d_out and out are read-only so they may safely share
+ * if the caller wanted — but they won't in practice.
+ *
+ * Preconditions:
+ *   - d_in, d_out, out are non-NULL
+ *   - N > 0, V > 0
+ *   - d_in has been zeroed (or pre-set) by the caller.
+ */
+void softmax_backward(float *d_in, const float *d_out, const float *out,
+                      int N, int V);
+
+/*
+ * layernorm_backward — gradient through row-wise layer normalization,
+ * including the learned affine parameters gamma and beta.
+ *
+ * Forward (per row, dropping the row index for brevity):
+ *   μ     = mean(in)
+ *   σ²    = var(in)
+ *   rstd  = 1 / sqrt(σ² + ε)
+ *   x_hat = (in - μ) * rstd
+ *   out   = gamma * x_hat + beta
+ *
+ * Per-row gradients (full derivation: see Kevin Clark's "LayerNorm
+ * backward" derivation or the comments in Karpathy's llm.c; this is the
+ * same formula every framework uses):
+ *   d_beta[c]  += d_out[c]
+ *   d_gamma[c] += d_out[c] * x_hat[c]
+ *   d_x_hat[c]  = d_out[c] * gamma[c]
+ *
+ *   Then for d_in we need to back-propagate through the (in - μ) * rstd
+ *   step. Both μ and rstd depend on every element of `in`, so d_in[c]
+ *   actually mixes contributions from every other column in the row.
+ *   The closed form is:
+ *
+ *   d_in[c] += rstd * ( d_x_hat[c]
+ *                       - (1/C) * sum_j d_x_hat[j]
+ *                       - x_hat[c] * (1/C) * sum_j (d_x_hat[j] * x_hat[j]) )
+ *
+ *   Intuitively: the first term is the "direct" gradient; the second
+ *   subtracts off the gradient's row-mean (because shifting in by a
+ *   constant doesn't change out — μ shifts with it); the third subtracts
+ *   the projection of d_x_hat onto x_hat (because scaling in doesn't
+ *   change out either — rstd rescales it back).
+ *
+ * d_beta and d_gamma have shape C (one entry per feature, summed over
+ * all N rows). d_in has shape N × C, just like in.
+ *
+ * Forward caches needed: we take `in` and recompute μ and rstd inside
+ * the backward. This is O(C) extra work per row vs. caching them, but
+ * keeps the layers.h surface area small. If profiling later shows
+ * layernorm is hot, we'll add a layernorm_forward_train variant that
+ * also returns mean and rstd buffers.
+ *
+ * Parameters:
+ *   d_in    — destination N*C floats, accumulated with +=.
+ *   d_gamma — destination C floats,  accumulated with +=.
+ *   d_beta  — destination C floats,  accumulated with +=.
+ *   d_out   — downstream gradient, N*C floats. Not modified.
+ *   in      — original forward input, N*C floats. Not modified.
+ *   gamma   — forward gamma, C floats. Not modified.
+ *   N, C    — same as the forward call.
+ *
+ * Preconditions:
+ *   - all six pointers are non-NULL
+ *   - N > 0, C > 0
+ *   - d_in, d_gamma, d_beta have been zeroed (or pre-set) by the caller.
+ */
+void layernorm_backward(float *d_in, float *d_gamma, float *d_beta,
+                        const float *d_out, const float *in,
+                        const float *gamma,
+                        int N, int C);
+
+/*
+ * embed_backward — scatter d_out into the embedding tables.
+ *
+ * Forward:
+ *   out[b, t, c] = wte[ tokens[b, t], c ] + wpe[ t, c ]
+ *
+ * The token IDs are integer indices, not floats, so there is NO gradient
+ * w.r.t. `tokens` — you can't take a derivative of "which row did I pick."
+ * What we DO compute are gradients into the embedding TABLES, which are
+ * the trainable parameters:
+ *
+ *   d_wte[ tokens[b,t], c ] += d_out[b, t, c]   (for every b, t, c)
+ *   d_wpe[ t,           c ] += d_out[b, t, c]   (for every b, t, c)
+ *
+ * The `+=` matters here more than anywhere else, because:
+ *   - The SAME token id can appear at many (b, t) positions in a batch.
+ *     Every appearance contributes to the same row of d_wte. Without +=
+ *     you would overwrite earlier contributions and silently lose
+ *     gradient signal — a classic, hard-to-spot bug.
+ *   - For d_wpe, every batch element contributes to the SAME row t,
+ *     so each d_wpe[t] row accumulates B contributions per call (one
+ *     per batch element at position t). Trivially correct with B=1,
+ *     but with B>1 the contributions MUST be summed, not overwritten.
+ *
+ * Forward caches needed: we take `tokens` (to know which rows of wte
+ * to write to) and the dimensions. We do NOT need `wte`, `wpe`, or the
+ * forward `out` — the gradient is purely a scatter.
+ *
+ * Parameters:
+ *   d_wte  — destination of shape vocab_size × C, accumulated with +=.
+ *            Caller MUST know vocab_size and allocate accordingly; we
+ *            never iterate it explicitly here (we only index by token id,
+ *            same as embed_forward), so the function signature does not
+ *            include it. Same validity contract as embed_forward: every
+ *            token id must satisfy 0 <= id < vocab_size, or we write
+ *            garbage to wherever (d_wte + id*C) lands in memory.
+ *   d_wpe  — destination of shape max_seq_len × C, accumulated with +=.
+ *            Likewise, T must satisfy T <= max_seq_len.
+ *   d_out  — downstream gradient of shape B*T*C. Not modified.
+ *   tokens — original integer token IDs of shape B*T. Not modified.
+ *   B, T, C — same as the forward call.
+ *
+ * Preconditions:
+ *   - d_wte, d_wpe, d_out, tokens are non-NULL
+ *   - B > 0, T > 0, C > 0
+ *   - d_wte and d_wpe have been zeroed (or pre-set) by the caller.
+ *   - Token IDs are in range and T <= max_seq_len (same boundary
+ *     contract as embed_forward — enforced by the data pipeline, not
+ *     by an assert here, because vocab_size and max_seq_len are not
+ *     parameters of this function).
+ */
+void embed_backward(float *d_wte, float *d_wpe,
+                    const float *d_out, const int *tokens,
+                    int B, int T, int C);
 
 #endif /* LAYERS_H */
