@@ -33,3 +33,9 @@ add_test(NAME test_dataloader COMMAND test_dataloader)
 add_executable(test_layers test_layers.c)
 target_link_libraries(test_layers layers test_utils ${CMOCKA_LIBRARIES})
 add_test(NAME test_layers COMMAND test_layers)
+
+# Full-model tests — param count, finite loss, nonzero grads, and the
+# whole-model numerical gradient check (analytical vs finite-difference).
+add_executable(test_gpt test_gpt.c)
+target_link_libraries(test_gpt gpt test_utils ${CMOCKA_LIBRARIES})
+add_test(NAME test_gpt COMMAND test_gpt)
