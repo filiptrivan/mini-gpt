@@ -17,3 +17,11 @@ target_include_directories(dataloader PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # the project so the same logic mirrors easily to CUDA later.
 add_library(layers model/layers.c)
 target_include_directories(layers PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Full GPT model — wires the layer ops above into one transformer with a
+# complete forward pass (tokens -> loss) and backward pass (loss -> grads).
+# Links `layers` (the math) and `m` (libm: expf/tanhf/sqrtf/logf used in
+# attention, gelu, layernorm and cross-entropy).
+add_library(gpt model/gpt.c)
+target_include_directories(gpt PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(gpt PUBLIC layers m)
