@@ -33,24 +33,10 @@
 /* ------------------------------------------------------------------ */
 
 /*
- * fill_random_ids — fill an int array with deterministic pseudo-random token
- * ids in [0, vocab). We roll our own tiny linear-congruential generator (the
- * classic Numerical Recipes constants) instead of rand() so the sequence is
- * identical on every machine and every run — reproducibility matters for a
- * gradient check you might need to debug.
+ * fill_random_ids (deterministic pseudo-random token ids) now lives in the
+ * shared tests/helpers/test_utils.{h,c} — test_train.c needs the same helper,
+ * so it was extracted there rather than copied.
  *
- *   `s` is passed by pointer so the caller's seed keeps advancing across
- *   calls (otherwise two calls with the same seed would produce identical
- *   "random" arrays).
- */
-static void fill_random_ids(int *out, int n, int vocab, unsigned int *s) {
-    for (int i = 0; i < n; i++) {
-        *s = (*s) * 1664525u + 1013904223u;   /* advance the LCG state    */
-        out[i] = (int)((*s >> 16) % (unsigned)vocab);  /* high bits, then fold into range */
-    }
-}
-
-/*
  * randn_test — one standard-normal sample (Box-Muller over the same LCG as
  * fill_random_ids). Used to give the gradient-check model LARGER weights than
  * gpt_init's training default. See amplify_weights below for why that matters.

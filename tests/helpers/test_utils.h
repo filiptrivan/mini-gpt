@@ -80,4 +80,24 @@ void numerical_gradient(float *grad_out,
                         float *x, int n,
                         void *ctx, float h);
 
+/*
+ * fill_random_ids — fill an int array with deterministic pseudo-random token
+ * ids in [0, vocab).
+ *
+ * Several tests need a reproducible batch of token ids (gradient checks,
+ * the training acid test). We roll a tiny linear-congruential generator (the
+ * classic Numerical Recipes constants) instead of rand(), so the sequence is
+ * identical on every machine and every run — reproducibility matters when a
+ * test fails and you need to debug exactly what it fed the model.
+ *
+ *   out   — destination buffer, length n (caller-allocated, overwritten)
+ *   n     — number of ids to generate
+ *   vocab — exclusive upper bound: every id lands in [0, vocab)
+ *   s     — pointer to the generator state (the "seed"). ADVANCED in place so
+ *           successive calls with the same pointer keep producing fresh
+ *           values; two calls with the same seed VALUE would otherwise return
+ *           identical arrays. Pass &seed.
+ */
+void fill_random_ids(int *out, int n, int vocab, unsigned int *s);
+
 #endif /* TEST_UTILS_H */

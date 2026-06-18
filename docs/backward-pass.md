@@ -27,7 +27,7 @@ w_new = w_old  −  learning_rate × dL/dw
 That minus sign is the entire mechanism. Run it for thousands of steps
 and the loss drifts downward.
 
-The hard part: our model has ~270,000 weights, all stacked through many
+The hard part: our model has ~534,000 weights, all stacked through many
 layers. We can't compute `dL/dw` for each by hand. The **backward pass**
 is the algorithm that computes all of them at once, layer by layer,
 walking from the output back to the input — hence "back-propagation."
@@ -544,7 +544,7 @@ Three questions to sanity-check understanding:
 1. **Why do we walk backward instead of forward to compute gradients?**
    We could compute `dL/dw` for one weight `w` by perturbing `w`,
    re-running the entire forward, and measuring the change. That's
-   one forward pass per weight — 270,000 forward passes per training
+   one forward pass per weight — 534,000 forward passes per training
    step. Walking backward computes all gradients in *one* backward
    pass, by reusing the chain-rule product as we go. That's the whole
    reason "back-propagation" exists.

@@ -62,3 +62,25 @@ void numerical_gradient(float *grad_out,
         grad_out[i] = (L_plus - L_minus) * (0.5f / h);
     }
 }
+
+/*
+ * fill_random_ids — see test_utils.h for the contract and the why.
+ *
+ * The two magic constants (1664525, 1013904223) are the standard Numerical
+ * Recipes LCG multiplier/increment; multiplying and adding in 32-bit unsigned
+ * arithmetic wraps around (well-defined for unsigned in C) and walks through a
+ * long, repeatable cycle of states. We take the HIGH bits (`*s >> 16`) because
+ * the low bits of an LCG are notoriously non-random, then fold into [0, vocab)
+ * with the modulo.
+ */
+void fill_random_ids(int *out, int n, int vocab, unsigned int *s) {
+    assert(out   != NULL);
+    assert(s     != NULL);
+    assert(n     >= 0);
+    assert(vocab  > 0);
+
+    for (int i = 0; i < n; i++) {
+        *s = (*s) * 1664525u + 1013904223u;            /* advance the LCG state          */
+        out[i] = (int)((*s >> 16) % (unsigned)vocab);  /* high bits, then fold into range */
+    }
+}
