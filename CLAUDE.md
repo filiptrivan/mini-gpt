@@ -72,7 +72,7 @@ mpirun --allow-run-as-root -np 2 ./build/tests/test_distributed
 ## Model Architecture
 
 Small GPT-2 style: 2 layers, 128 embed dim, 4 heads, 512 ff dim, 512 vocab size.
-~270K parameters total. Trained on Serbian academic text (Latin script).
+~534K parameters total. Trained on Serbian academic text (Latin script).
 
 ## Session Workflow
 
@@ -83,6 +83,6 @@ Always run `ctest` after changes to verify nothing is broken.
 ## Important Notes
 
 - Never commit files from `data/raw/` (PDF and raw text)
-- The model will NOT produce coherent text — that's expected with 270K params
+- The model will NOT produce coherent text — that's expected with 534K params
 - Loss decreasing during training = success
 - Keep explanations simple — this is a learning project

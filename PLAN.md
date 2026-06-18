@@ -79,7 +79,7 @@ KP/
 | num_heads     | 4              |
 | num_layers    | 2              |
 | ff_dim        | 512 (4×C)      |
-| **Total params** | **~270K**   |
+| **Total params** | **~534K**   |
 
 ---
 
@@ -302,7 +302,7 @@ Source code uses `#ifdef USE_CUDA` / `#ifdef USE_MPI` guards for conditional com
 
 ## What to Expect from the Model
 
-With ~270K parameters on a small Serbian text corpus:
+With ~534K parameters on a small Serbian text corpus:
 - It will NOT produce coherent Serbian sentences
 - It WILL learn character/word-fragment patterns
 - Output will "look like" Serbian text at a glance (correct character distributions, common words)

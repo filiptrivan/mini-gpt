@@ -44,7 +44,7 @@ dimensions. These letters appear everywhere.
 | **M, K, N** | matmul-specific: `(M × K) @ (K × N) = (M × N)` | varies |
 | **N, V** (in softmax) | row count and row width for row-wise softmax | varies |
 
-The seminar model in `PLAN.md`: B varies, T=64, C=128, ff_dim=512, V=512, num_heads=4, num_layers=2 → ~270K parameters.
+The seminar model in `PLAN.md`: B varies, T=64, C=128, ff_dim=512, V=512, num_heads=4, num_layers=2 → ~534K parameters (533,760 exactly).
 
 ---
 
@@ -262,3 +262,6 @@ The "concurrent and distributed" part of the seminar.
 - `docs/bpe-training.md` — BPE algorithm walked by hand
 - `docs/dataloader.md` — data loader walked by hand
 - `docs/forward-pass.md` — embed → FFN → output, walked by hand
+- `docs/backward-pass.md` — gradients flowing back through each layer
+- `docs/gpt-model.md` — wiring the layers into one full transformer
+- `docs/adamw.md` — the AdamW optimizer: gradients → weight updates

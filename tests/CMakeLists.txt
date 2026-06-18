@@ -39,3 +39,15 @@ add_test(NAME test_layers COMMAND test_layers)
 add_executable(test_gpt test_gpt.c)
 target_link_libraries(test_gpt gpt test_utils ${CMOCKA_LIBRARIES})
 add_test(NAME test_gpt COMMAND test_gpt)
+
+# AdamW optimizer tests — moment accumulation against hand-computed values,
+# loss reduction on a quadratic bowl, and decoupled weight decay.
+add_executable(test_adamw test_adamw.c)
+target_link_libraries(test_adamw adamw ${CMOCKA_LIBRARIES})
+add_test(NAME test_adamw COMMAND test_adamw)
+
+# Training "acid test" — compose the full pipeline (forward -> backward ->
+# adamw_step) on a tiny model and assert it overfits one batch (loss falls).
+add_executable(test_train test_train.c)
+target_link_libraries(test_train gpt adamw test_utils ${CMOCKA_LIBRARIES})
+add_test(NAME test_train COMMAND test_train)

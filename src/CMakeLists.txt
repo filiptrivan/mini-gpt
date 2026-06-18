@@ -25,3 +25,16 @@ target_include_directories(layers PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 add_library(gpt model/gpt.c)
 target_include_directories(gpt PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(gpt PUBLIC layers m)
+
+# AdamW optimizer — turns gradients into weight updates (the part of training
+# that improves the model). Operates on the model's flat params/grads blocks,
+# so it has no dependency on the GPT model itself. Links `m` for sqrtf/powf.
+add_library(adamw optimizer/adamw.c)
+target_include_directories(adamw PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(adamw PUBLIC m)
+
+# train — the CPU training program (the "acid test"): load tokens, then loop
+# dataloader -> forward -> backward -> adamw_step and watch the loss fall.
+# Pure CPU for now; CUDA/MPI wiring arrives in later tasks.
+add_executable(train train.c)
+target_link_libraries(train gpt adamw dataloader)
