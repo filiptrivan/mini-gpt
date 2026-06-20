@@ -18,11 +18,22 @@
  * by an `if(ENABLE_CUDA)` guard in tests/CMakeLists.txt.
  */
 
-/* CMocka's required four includes, same block/order as every test file. */
+/* CMocka's required four includes, same block/order as every test file.
+ *
+ * cmocka.h is wrapped in extern "C" here (the other, plain-C test files don't
+ * need this). Reason: this file is compiled by nvcc as C++, and the cmocka.h
+ * that ships in Colab's libcmocka-dev does NOT carry its own extern "C"
+ * guards. Without the wrapper, C++ name-mangles cmocka's functions
+ * (assert_float_equal, cmocka_run_group_tests, ...) and they fail to link
+ * against the C libcmocka with "undefined reference". Same fix we apply to
+ * model/layers.h just below. The stdarg/stddef/setjmp headers must come first
+ * (cmocka.h uses va_list/size_t/jmp_buf) and stay as normal includes. */
 #include <stdarg.h>
 #include <stddef.h>
 #include <setjmp.h>
+extern "C" {
 #include <cmocka.h>
+}
 
 #include <stdlib.h>   /* malloc, free */
 
