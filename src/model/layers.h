@@ -1,6 +1,16 @@
 #ifndef LAYERS_H
 #define LAYERS_H
 
+/* These are C functions. The extern "C" guard stops a C++ compiler — e.g.
+ * nvcc compiling the .cu CUDA tests/kernels — from name-mangling them, so the
+ * symbols link against the C-built `layers` library. It is invisible to plain
+ * C, and mirrors the guard already used in src/cuda/cuda_layers.cuh. Having
+ * the header self-describe its linkage means C++/CUDA callers just #include it
+ * normally, instead of wrapping the include in extern "C" at each call site. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * Neural network layer operations — CPU forward and backward passes.
  *
@@ -513,5 +523,9 @@ void layernorm_backward(float *d_in, float *d_gamma, float *d_beta,
 void embed_backward(float *d_wte, float *d_wpe,
                     const float *d_out, const int *tokens,
                     int B, int T, int C);
+
+#ifdef __cplusplus
+}  /* extern "C" */
+#endif
 
 #endif /* LAYERS_H */

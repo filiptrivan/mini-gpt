@@ -37,12 +37,10 @@ extern "C" {
 
 #include <stdlib.h>   /* malloc, free */
 
-/* The CPU oracle. layers.h is a plain C header with no extern "C" guards of
- * its own, so we add them here: without this, nvcc (C++) would mangle the
- * names and fail to link against the C-compiled `layers` static library. */
-extern "C" {
+/* The CPU oracle. layers.h carries its own extern "C" guards, so a plain
+ * include gives the correct C linkage to match the C-built `layers` library —
+ * no need to wrap it here (unlike cmocka.h above, which we can't edit). */
 #include "model/layers.h"
-}
 
 /* The CUDA wrappers under test. This header already declares them extern "C". */
 #include "cuda/cuda_layers.cuh"
@@ -60,10 +58,12 @@ extern "C" {
 
 /*
  * fill_pseudo_random — fill a float array with deterministic values in
- * roughly [-1, 1). We use the same linear-congruential generator constants as
- * tests/helpers/test_utils.c so the sequence is identical on every machine and
- * every run — reproducibility matters when a remote (Colab) test fails and we
- * need to reason about exactly what was fed in.
+ * roughly [-1, 1). It rolls a tiny linear-congruential generator (the same
+ * Numerical Recipes multiplier/increment used elsewhere in the project) so the
+ * output is fixed on every machine and every run. Note it maps the bits to a
+ * float, so the sequence is NOT the same as test_utils's integer
+ * fill_random_ids — reproducibility, not cross-helper equality, is the point:
+ * when a remote (Colab) test fails we can reason about exactly what was fed in.
  *
  *   buf   — destination, length n (caller-allocated)
  *   n     — element count
