@@ -10,6 +10,13 @@ option(ENABLE_MPI  "Enable MPI data parallelism" OFF)
 if(ENABLE_CUDA)
     enable_language(CUDA)
     add_compile_definitions(USE_CUDA)
+    # CMake >= 3.18 requires an explicit GPU architecture or the CUDA build
+    # errors with "CMAKE_CUDA_ARCHITECTURES is empty". 75 = sm_75 = the Tesla
+    # T4 that Google Colab hands out. Override on the command line for other
+    # GPUs, e.g. -DCMAKE_CUDA_ARCHITECTURES=80 for an A100.
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+        set(CMAKE_CUDA_ARCHITECTURES 75)
+    endif()
 endif()
 
 if(ENABLE_MPI)
