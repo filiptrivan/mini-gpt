@@ -17,6 +17,12 @@ target_include_directories(dataloader PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # the project so the same logic mirrors easily to CUDA later.
 add_library(layers model/layers.c)
 target_include_directories(layers PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+# layers.c calls tanhf/expf/sqrtf from the math library (libm). On macOS libm
+# is part of the default C runtime so linking "just works"; on Linux (e.g.
+# Colab) it must be linked explicitly or the link fails with "undefined
+# reference to tanhf/expf/sqrtf". PUBLIC so every target that links `layers`
+# (test_layers, gpt, test_cuda_layers, ...) inherits -lm transitively.
+target_link_libraries(layers PUBLIC m)
 
 # Full GPT model — wires the layer ops above into one transformer with a
 # complete forward pass (tokens -> loss) and backward pass (loss -> grads).
