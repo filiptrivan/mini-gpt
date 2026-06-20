@@ -17,6 +17,12 @@ target_include_directories(dataloader PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # the project so the same logic mirrors easily to CUDA later.
 add_library(layers model/layers.c)
 target_include_directories(layers PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+# layers.c calls tanhf/expf/sqrtf from the math library (libm). On macOS libm
+# is part of the default C runtime so linking "just works"; on Linux (e.g.
+# Colab) it must be linked explicitly or the link fails with "undefined
+# reference to tanhf/expf/sqrtf". PUBLIC so every target that links `layers`
+# (test_layers, gpt, test_cuda_layers, ...) inherits -lm transitively.
+target_link_libraries(layers PUBLIC m)
 
 # Full GPT model — wires the layer ops above into one transformer with a
 # complete forward pass (tokens -> loss) and backward pass (loss -> grads).
@@ -32,6 +38,17 @@ target_link_libraries(gpt PUBLIC layers m)
 add_library(adamw optimizer/adamw.c)
 target_include_directories(adamw PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(adamw PUBLIC m)
+
+# CUDA layer kernels (Task 9) — GPU forward passes for matmul and layernorm.
+# Built only when ENABLE_CUDA is set (Colab); the Mac CPU build skips this
+# entirely so day-to-day development never needs a CUDA toolchain. The Task 9
+# tests link this alongside the CPU `layers` lib and compare their outputs.
+if(ENABLE_CUDA)
+    add_library(cuda_layers cuda/matmul.cu cuda/layernorm.cu)
+    # PUBLIC export of src/ so includes like "cuda/cuda_layers.cuh" and
+    # "model/layers.h" resolve for anything that links this target.
+    target_include_directories(cuda_layers PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+endif()
 
 # train — the CPU training program (the "acid test"): load tokens, then loop
 # dataloader -> forward -> backward -> adamw_step and watch the loss fall.
