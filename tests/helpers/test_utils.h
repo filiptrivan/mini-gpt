@@ -15,6 +15,15 @@
  * errors when this header is pulled in from multiple test .c files.
  */
 
+/* extern "C": these helpers are compiled as C (test_utils.c), but the CUDA test
+ * TUs (test_cuda_layers.cu, test_gpt_cuda.cu) are compiled by nvcc as C++ and
+ * include this header to call fill_random_ids. Without C linkage the C++ side
+ * would name-mangle the symbols and fail to link the C-built test_utils lib —
+ * the same self-describing-linkage guard already on layers.h / gpt.h. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * test_loss_fn_t — function pointer type for a scalar loss L(x).
  *
@@ -99,5 +108,9 @@ void numerical_gradient(float *grad_out,
  *           identical arrays. Pass &seed.
  */
 void fill_random_ids(int *out, int n, int vocab, unsigned int *s);
+
+#ifdef __cplusplus
+}  /* extern "C" */
+#endif
 
 #endif /* TEST_UTILS_H */

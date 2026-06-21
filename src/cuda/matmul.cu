@@ -1,9 +1,10 @@
 /*
- * Tiled matrix multiply on the GPU — out = a @ b.
+ * Tiled matrix multiply on the GPU — out = a @ b (forward), plus the two
+ * gradient matmuls of the backward pass.
  *
  * This is the most performance-critical kernel in the project (every linear
  * layer and the attention projections are matmuls). The CPU version in
- * src/model/layers.c is a simple triple loop; here we use the classic
+ * src/model/layers.c is a simple triple loop; the FORWARD here uses the classic
  * "shared-memory tiling" technique that every CUDA textbook teaches, because
  * a naive GPU matmul is bottlenecked on global-memory bandwidth.
  *
@@ -17,6 +18,13 @@
  *   the shared K dimension, accumulating partial dot products, until the whole
  *   row x column dot product is done. Each global value is now read once per
  *   tile instead of once per output cell — far fewer slow memory trips.
+ *
+ * The BACKWARD pass (matmul_backward) is deliberately NOT tiled — it uses the
+ * simple "one thread per output element, loop over the contracted dimension"
+ * design. Correctness over peak speed: the tiling idea is demonstrated once in
+ * the forward kernel; duplicating it for the two transposed-operand backward
+ * matmuls would triple the surface area where a subtle indexing bug could hide.
+ * See the comment on matmul_backward_kernel_da below.
  */
 
 #include "cuda/cuda_layers.cuh"
@@ -27,14 +35,15 @@
  * output element of the tile. 16 is the conventional sweet spot: two TILE x
  * TILE float tiles (As + Bs) cost 16*16*4*2 = 2 KB of shared memory, well
  * within every GPU's per-block budget, and 256 threads/block keeps the SM
- * occupancy high. The PLAN.md kernel table pins this at TILE=16.
+ * occupancy high. The PLAN.md kernel table pins this at TILE=16. The backward
+ * kernels reuse it purely as their 2D block side length (no shared memory).
  */
 #define TILE 16
 
 /*
  * matmul_forward_kernel — one thread computes one out[row][col] element.
  *
- * Grid/block layout (set up by the wrapper below):
+ * Grid/block layout (set up by the launcher below):
  *   blockDim  = (TILE, TILE)                    -> 256 threads per block
  *   gridDim.x = ceil(N / TILE)  (covers columns of out / b)
  *   gridDim.y = ceil(M / TILE)  (covers rows of out / a)
@@ -109,24 +118,112 @@ __global__ void matmul_forward_kernel(float *out, const float *a, const float *b
 }
 
 /*
+ * matmul_backward_kernel_da — d_a[i,k] += sum_j d_out[i,j] * b[k,j].
+ *
+ * This is the gradient w.r.t. the first matmul input, mathematically
+ * d_a = d_out @ b^T (shape M x K). One thread owns one output cell d_a[i,k]
+ * and walks the contracted dimension j (length N) itself:
+ *   for j in [0,N): sum += d_out[i*N + j] * b[k*N + j]
+ * Both d_out's row i and b's row k are contiguous, so the inner loop streams
+ * two cache-friendly arrays — the same access pattern as the CPU version's
+ * pass 1. The result is ADDED (+=) so it accumulates onto whatever the caller
+ * already had (the project-wide backward convention).
+ *
+ * Grid: blockDim = (TILE, TILE); gridDim.x covers k (the K axis),
+ * gridDim.y covers i (the M axis). Out-of-range threads just return.
+ */
+__global__ void matmul_backward_kernel_da(float *d_a, const float *d_out,
+                                          const float *b, int M, int K, int N) {
+    int i = blockIdx.y * TILE + threadIdx.y;   /* row of d_a / d_out */
+    int k = blockIdx.x * TILE + threadIdx.x;   /* col of d_a / row of b */
+    if (i >= M || k >= K) return;
+
+    const float *d_out_row = d_out + (size_t)i * N;   /* d_out[i, 0..N-1] */
+    const float *b_row     = b     + (size_t)k * N;   /* b[k, 0..N-1]     */
+    float sum = 0.0f;
+    for (int j = 0; j < N; j++) {
+        sum += d_out_row[j] * b_row[j];
+    }
+    d_a[(size_t)i * K + k] += sum;
+}
+
+/*
+ * matmul_backward_kernel_db — d_b[k,j] += sum_i a[i,k] * d_out[i,j].
+ *
+ * Gradient w.r.t. the second matmul input, mathematically d_b = a^T @ d_out
+ * (shape K x N). One thread owns one cell d_b[k,j] and walks the contracted
+ * dimension i (length M). Note this stride is NOT contiguous (a[i*K+k] and
+ * d_out[i*N+j] both jump a whole row per i), but correctness is the goal here;
+ * the value is summed in a register and written once. += accumulates.
+ *
+ * Grid: blockDim = (TILE, TILE); gridDim.x covers j (the N axis),
+ * gridDim.y covers k (the K axis).
+ */
+__global__ void matmul_backward_kernel_db(float *d_b, const float *d_out,
+                                          const float *a, int M, int K, int N) {
+    int k = blockIdx.y * TILE + threadIdx.y;   /* row of d_b / col of a */
+    int j = blockIdx.x * TILE + threadIdx.x;   /* col of d_b / d_out    */
+    if (k >= K || j >= N) return;
+
+    float sum = 0.0f;
+    for (int i = 0; i < M; i++) {
+        sum += a[(size_t)i * K + k] * d_out[(size_t)i * N + j];
+    }
+    d_b[(size_t)k * N + j] += sum;
+}
+
+/* ---------------------------------------------------------------------- */
+/*                         device-pointer launchers                       */
+/* ---------------------------------------------------------------------- */
+
+/*
+ * matmul_forward_device — launch the tiled forward kernel on DEVICE pointers.
+ * All three pointers are already device memory; this only sizes the 2D grid
+ * (one block per TILE x TILE output tile) and launches. See cuda_layers.cuh.
+ */
+extern "C" void matmul_forward_device(float *d_out, const float *d_a,
+                                      const float *d_b, int M, int K, int N) {
+    dim3 block(TILE, TILE);
+    dim3 grid((N + TILE - 1) / TILE, (M + TILE - 1) / TILE);
+    matmul_forward_kernel<<<grid, block>>>(d_out, d_a, d_b, M, K, N);
+    CUDA_CHECK(cudaGetLastError());   /* catch an invalid launch configuration */
+}
+
+/*
+ * matmul_backward_device — launch both gradient kernels on DEVICE pointers.
+ * d_da and d_db are independent buffers written by two separate kernels; both
+ * accumulate with += onto their current device contents.
+ */
+extern "C" void matmul_backward_device(float *d_da, float *d_db,
+                                       const float *d_dout, const float *d_a,
+                                       const float *d_b, int M, int K, int N) {
+    dim3 block(TILE, TILE);
+
+    /* d_a is M x K: grid.x covers K, grid.y covers M. */
+    dim3 grid_da((K + TILE - 1) / TILE, (M + TILE - 1) / TILE);
+    matmul_backward_kernel_da<<<grid_da, block>>>(d_da, d_dout, d_b, M, K, N);
+    CUDA_CHECK(cudaGetLastError());
+
+    /* d_b is K x N: grid.x covers N, grid.y covers K. */
+    dim3 grid_db((N + TILE - 1) / TILE, (K + TILE - 1) / TILE);
+    matmul_backward_kernel_db<<<grid_db, block>>>(d_db, d_dout, d_a, M, K, N);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+/* ---------------------------------------------------------------------- */
+/*                       host wrappers (oracle pattern)                    */
+/* ---------------------------------------------------------------------- */
+
+/*
  * matmul_forward_cuda — host wrapper. See cuda_layers.cuh for the contract.
  *
- * Steps:
- *   1. Allocate device buffers for a, b, out.
- *   2. Copy a and b host->device.
- *   3. Launch the tiled kernel over a 2D grid that covers all of out.
- *   4. Copy out device->host.
- *   5. Free the device buffers.
- *
- * Every CUDA call is wrapped in CUDA_CHECK so a failure aborts loudly with a
- * file/line rather than silently returning wrong numbers. After the launch we
- * check cudaGetLastError() (catches bad launch configs, which the launch
- * syntax itself cannot report) and then cudaDeviceSynchronize() via the
- * device->host copy, which blocks until the kernel has actually finished.
+ * Allocates device buffers, copies a and b up, calls the device launcher,
+ * copies out back, frees. size_t math (not int) so large matrices don't
+ * overflow the byte count. Every CUDA call is CUDA_CHECK-wrapped; the final
+ * device->host copy blocks until the kernel has actually finished.
  */
 extern "C" void matmul_forward_cuda(float *out, const float *a, const float *b,
                                     int M, int K, int N) {
-    /* size_t math (not int) so large matrices don't overflow the byte count. */
     size_t bytes_a   = (size_t)M * K * sizeof(float);
     size_t bytes_b   = (size_t)K * N * sizeof(float);
     size_t bytes_out = (size_t)M * N * sizeof(float);
@@ -139,17 +236,53 @@ extern "C" void matmul_forward_cuda(float *out, const float *a, const float *b,
     CUDA_CHECK(cudaMemcpy(d_a, a, bytes_a, cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_b, b, bytes_b, cudaMemcpyHostToDevice));
 
-    /* One thread per output element; one block per TILE x TILE output tile.
-     * grid.x covers the N (column) axis, grid.y covers the M (row) axis. */
-    dim3 block(TILE, TILE);
-    dim3 grid((N + TILE - 1) / TILE, (M + TILE - 1) / TILE);
-
-    matmul_forward_kernel<<<grid, block>>>(d_out, d_a, d_b, M, K, N);
-    CUDA_CHECK(cudaGetLastError());   /* catch an invalid launch configuration */
+    matmul_forward_device(d_out, d_a, d_b, M, K, N);
 
     CUDA_CHECK(cudaMemcpy(out, d_out, bytes_out, cudaMemcpyDeviceToHost));
 
     CUDA_CHECK(cudaFree(d_a));
     CUDA_CHECK(cudaFree(d_b));
     CUDA_CHECK(cudaFree(d_out));
+}
+
+/*
+ * matmul_backward_cuda — host wrapper for the two gradient matmuls.
+ *
+ * d_a and d_b are accumulated with += (the convention), so we copy the
+ * caller's CURRENT d_a / d_b up to the device before launching, let the kernels
+ * add onto them, and copy the results back. The forward inputs a and b and the
+ * upstream gradient d_out are read-only.
+ */
+extern "C" void matmul_backward_cuda(float *d_a, float *d_b, const float *d_out,
+                                     const float *a, const float *b,
+                                     int M, int K, int N) {
+    size_t bytes_a   = (size_t)M * K * sizeof(float);   /* a and d_a */
+    size_t bytes_b   = (size_t)K * N * sizeof(float);   /* b and d_b */
+    size_t bytes_out = (size_t)M * N * sizeof(float);   /* d_out     */
+
+    float *dd_a = NULL, *dd_b = NULL, *dd_out = NULL, *d_a_in = NULL, *d_b_in = NULL;
+    CUDA_CHECK(cudaMalloc(&dd_a,   bytes_a));   /* device copy of d_a (grad)  */
+    CUDA_CHECK(cudaMalloc(&dd_b,   bytes_b));   /* device copy of d_b (grad)  */
+    CUDA_CHECK(cudaMalloc(&dd_out, bytes_out)); /* device copy of d_out       */
+    CUDA_CHECK(cudaMalloc(&d_a_in, bytes_a));   /* device copy of forward a   */
+    CUDA_CHECK(cudaMalloc(&d_b_in, bytes_b));   /* device copy of forward b   */
+
+    /* copy the grad accumulators UP too, so the kernel's += starts from the
+     * caller's current contents (lets tests verify accumulation). */
+    CUDA_CHECK(cudaMemcpy(dd_a,   d_a,   bytes_a,   cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dd_b,   d_b,   bytes_b,   cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dd_out, d_out, bytes_out, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_a_in, a,     bytes_a,   cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_b_in, b,     bytes_b,   cudaMemcpyHostToDevice));
+
+    matmul_backward_device(dd_a, dd_b, dd_out, d_a_in, d_b_in, M, K, N);
+
+    CUDA_CHECK(cudaMemcpy(d_a, dd_a, bytes_a, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(d_b, dd_b, bytes_b, cudaMemcpyDeviceToHost));
+
+    CUDA_CHECK(cudaFree(dd_a));
+    CUDA_CHECK(cudaFree(dd_b));
+    CUDA_CHECK(cudaFree(dd_out));
+    CUDA_CHECK(cudaFree(d_a_in));
+    CUDA_CHECK(cudaFree(d_b_in));
 }

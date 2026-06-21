@@ -52,11 +52,21 @@ add_executable(test_train test_train.c)
 target_link_libraries(test_train gpt adamw test_utils ${CMOCKA_LIBRARIES})
 add_test(NAME test_train COMMAND test_train)
 
-# CUDA kernel tests (Task 9) — compiled only on a machine with a CUDA
-# toolchain (Colab). Each test runs the CPU `layers` function as the oracle
-# and the matching `cuda_layers` kernel under test, then asserts they agree.
+# CUDA kernel tests (Task 9 + Task 10) — compiled only on a machine with a CUDA
+# toolchain (Colab). Each test runs the CPU function as the oracle and the
+# matching CUDA kernel under test, then asserts they agree within tolerance.
 if(ENABLE_CUDA)
+    # Per-kernel parity. Links `gpt` too because attention_forward/backward (the
+    # oracles for the attention kernels) live in gpt.c, not layers.c, and
+    # `test_utils` for fill_random_ids (the shared reproducible id generator).
     add_executable(test_cuda_layers test_cuda_layers.cu)
-    target_link_libraries(test_cuda_layers layers cuda_layers ${CMOCKA_LIBRARIES})
+    target_link_libraries(test_cuda_layers layers gpt cuda_layers test_utils ${CMOCKA_LIBRARIES})
     add_test(NAME test_cuda_layers COMMAND test_cuda_layers)
+
+    # Full-model parity: gpt_forward/gpt_backward (CPU) vs gpt_forward_cuda/
+    # gpt_backward_cuda, on two identically-seeded models. `test_utils` supplies
+    # fill_random_ids for the token batches.
+    add_executable(test_gpt_cuda test_gpt_cuda.cu)
+    target_link_libraries(test_gpt_cuda gpt cuda_gpt cuda_layers test_utils ${CMOCKA_LIBRARIES})
+    add_test(NAME test_gpt_cuda COMMAND test_gpt_cuda)
 endif()

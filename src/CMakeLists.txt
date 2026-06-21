@@ -39,15 +39,30 @@ add_library(adamw optimizer/adamw.c)
 target_include_directories(adamw PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(adamw PUBLIC m)
 
-# CUDA layer kernels (Task 9) — GPU forward passes for matmul and layernorm.
-# Built only when ENABLE_CUDA is set (Colab); the Mac CPU build skips this
-# entirely so day-to-day development never needs a CUDA toolchain. The Task 9
-# tests link this alongside the CPU `layers` lib and compare their outputs.
+# CUDA layer kernels (Task 9 + Task 10) — GPU forward AND backward passes for
+# every layer op. Built only when ENABLE_CUDA is set (Colab); the Mac CPU build
+# skips this entirely so day-to-day development never needs a CUDA toolchain.
+# The parity tests link this alongside the CPU `layers`/`gpt` libs and compare
+# their outputs kernel by kernel.
 if(ENABLE_CUDA)
-    add_library(cuda_layers cuda/matmul.cu cuda/layernorm.cu)
+    add_library(cuda_layers
+        cuda/matmul.cu          # tiled matmul (fwd) + the two gradient matmuls (bwd)
+        cuda/layernorm.cu       # row-wise layernorm (fwd/bwd, atomicAdd on gamma/beta)
+        cuda/elementwise.cu     # gelu + residual (fwd/bwd)
+        cuda/softmax.cu         # row-wise softmax (fwd/bwd)
+        cuda/embedding.cu       # token+pos embedding (fwd, bwd scatter via atomicAdd)
+        cuda/cross_entropy.cu   # per-position loss (fwd) + fused softmax+CE grad (bwd)
+        cuda/attention.cu)      # causal multi-head self-attention (fwd/bwd)
     # PUBLIC export of src/ so includes like "cuda/cuda_layers.cuh" and
     # "model/layers.h" resolve for anything that links this target.
     target_include_directories(cuda_layers PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
+    # Full-model GPU forward/backward (Task 10): wires the _device launchers in
+    # cuda_layers into one resident pass. Reads the model's layout (GPTModel,
+    # gpt_ensure_acts) from the `gpt` library, so it links both.
+    add_library(cuda_gpt cuda/gpt_cuda.cu)
+    target_include_directories(cuda_gpt PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(cuda_gpt PUBLIC cuda_layers gpt)
 endif()
 
 # train — the CPU training program (the "acid test"): load tokens, then loop
