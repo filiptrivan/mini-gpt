@@ -65,8 +65,25 @@ if(ENABLE_CUDA)
     target_link_libraries(cuda_gpt PUBLIC cuda_layers gpt)
 endif()
 
-# train — the CPU training program (the "acid test"): load tokens, then loop
-# dataloader -> forward -> backward -> adamw_step and watch the loss fall.
-# Pure CPU for now; CUDA/MPI wiring arrives in later tasks.
+# MPI data-parallel layer (Task 11) — MPI_Init/Finalize plus the two collective
+# operations training needs: average gradients across ranks (allreduce-mean) and
+# share rank 0's initial weights (broadcast). Built only when ENABLE_MPI is set
+# (Colab); the Mac CPU build skips it, and train.c's MPI calls are #ifdef'd out.
+# find_package(MPI) in the root CMakeLists already located the headers/libs; the
+# MPI::MPI_C imported target carries the right include path and link flags.
+if(ENABLE_MPI)
+    add_library(mpi_utils distributed/mpi_utils.c)
+    target_include_directories(mpi_utils PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(mpi_utils PUBLIC MPI::MPI_C)
+endif()
+
+# train — the training program (the "acid test"): load tokens, then loop
+# dataloader -> forward -> backward -> adamw_step and watch the loss fall. When
+# ENABLE_MPI is on it also links the MPI layer and runs data-parallel under
+# mpirun (broadcast weights, average gradients each step); otherwise it is the
+# plain single-process CPU loop.
 add_executable(train train.c)
 target_link_libraries(train gpt adamw dataloader)
+if(ENABLE_MPI)
+    target_link_libraries(train mpi_utils MPI::MPI_C)
+endif()

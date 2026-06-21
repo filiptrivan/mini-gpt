@@ -70,3 +70,24 @@ if(ENABLE_CUDA)
     target_link_libraries(test_gpt_cuda gpt cuda_gpt cuda_layers test_utils ${CMOCKA_LIBRARIES})
     add_test(NAME test_gpt_cuda COMMAND test_gpt_cuda)
 endif()
+
+# MPI distributed tests (Task 11) — built only when ENABLE_MPI is set (Colab).
+# This test is special: it MUST be launched with `mpirun -np 2` so MPI starts
+# two ranks that then check they agree after allreduce/broadcast. We register it
+# with `add_test` so `ctest` runs it under mpirun automatically; MPIEXEC_*
+# variables come from find_package(MPI) and resolve to the local mpirun. Links
+# `mpi_utils` (the layer under test), plus `gpt`/`adamw` (the in-sync step test)
+# and `test_utils` (fill_random_ids for the per-rank batches).
+if(ENABLE_MPI)
+    add_executable(test_distributed test_distributed.c)
+    target_link_libraries(test_distributed
+        mpi_utils gpt adamw test_utils MPI::MPI_C ${CMOCKA_LIBRARIES})
+    # ctest invocation: mpirun --allow-run-as-root -np 2 ./test_distributed
+    # MPIEXEC_EXECUTABLE / _NUMPROC_FLAG / _PREFLAGS come from FindMPI. Colab
+    # runs as root and OpenMPI refuses that without --allow-run-as-root, so we
+    # add it here to match the project's documented manual command (CLAUDE.md);
+    # OpenMPI accepts the flag whether or not you are actually root.
+    add_test(NAME test_distributed
+             COMMAND ${MPIEXEC_EXECUTABLE} --allow-run-as-root ${MPIEXEC_PREFLAGS}
+                     ${MPIEXEC_NUMPROC_FLAG} 2 $<TARGET_FILE:test_distributed>)
+endif()
