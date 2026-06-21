@@ -26,9 +26,11 @@ target_link_libraries(layers PUBLIC m)
 
 # Full GPT model — wires the layer ops above into one transformer with a
 # complete forward pass (tokens -> loss) and backward pass (loss -> grads).
-# Links `layers` (the math) and `m` (libm: expf/tanhf/sqrtf/logf used in
-# attention, gelu, layernorm and cross-entropy).
-add_library(gpt model/gpt.c)
+# gpt_io.c adds checkpoint save/load (Task 13), the bridge from training to
+# generation — bundled into the same library, mirroring how bpe_io rides along
+# with bpe. Links `layers` (the math) and `m` (libm: expf/tanhf/sqrtf/logf used
+# in attention, gelu, layernorm and cross-entropy).
+add_library(gpt model/gpt.c model/gpt_io.c)
 target_include_directories(gpt PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(gpt PUBLIC layers m)
 

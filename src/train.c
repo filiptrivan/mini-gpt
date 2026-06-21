@@ -41,6 +41,7 @@
 #include <stdlib.h>   /* atoi, atof, malloc, free */
 
 #include "model/gpt.h"
+#include "model/gpt_io.h"     /* gpt_save — write a checkpoint after training */
 #include "optimizer/adamw.h"
 #include "data/dataloader.h"
 
@@ -77,9 +78,10 @@ int main(int argc, char **argv) {
     mpi_setup(&argc, &argv, &rank, &world_size);
 #endif
 
-    if (argc < 2 || argc > 4) {
+    if (argc < 2 || argc > 5) {
         if (rank == 0) {
-            fprintf(stderr, "Usage: %s <tokens.bin> [steps] [lr]\n", argv[0]);
+            fprintf(stderr,
+                    "Usage: %s <tokens.bin> [steps] [lr] [out.ckpt]\n", argv[0]);
         }
         mpi_teardown_if_enabled();
         return 1;
@@ -87,6 +89,9 @@ int main(int argc, char **argv) {
     const char *data_path = argv[1];
     int   steps = (argc >= 3) ? atoi(argv[2])         : 50;
     float lr    = (argc >= 4) ? (float)atof(argv[3])  : 1e-3f;
+    /* Optional: where to save the trained weights. NULL = don't save (keeps the
+     * old behaviour and the tests' invocations working unchanged). */
+    const char *ckpt_path = (argc >= 5) ? argv[4] : NULL;
     if (steps <= 0) {
         if (rank == 0) {
             fprintf(stderr, "steps must be positive (got %d)\n", steps);
@@ -222,6 +227,19 @@ int main(int argc, char **argv) {
         printf("\nloss: %.4f -> %.4f  (%s)\n",
                first_loss, model.loss,
                model.loss < first_loss ? "DECREASED" : "did NOT decrease");
+    }
+
+    /* ---- Save the trained weights (optional) ---- */
+    /* Only rank 0 writes: under MPI every rank holds identical weights, so one
+     * writer is enough and avoids several processes racing on the same file.
+     * The checkpoint is what tools/generate.c loads to produce text. */
+    if (ckpt_path != NULL && rank == 0) {
+        if (gpt_save(&model, ckpt_path) == 0) {
+            printf("Saved checkpoint to %s\n", ckpt_path);
+        } else {
+            fprintf(stderr, "WARNING: failed to save checkpoint to %s\n",
+                    ckpt_path);
+        }
     }
 
     /* ---- Cleanup ---- */

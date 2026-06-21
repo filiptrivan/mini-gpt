@@ -52,6 +52,13 @@ add_executable(test_train test_train.c)
 target_link_libraries(test_train gpt adamw test_utils ${CMOCKA_LIBRARIES})
 add_test(NAME test_train COMMAND test_train)
 
+# Checkpoint save/load tests (Task 13) — roundtrip a model through a file and
+# assert the weights (and a forward loss) come back identical. Links `gpt`,
+# which now includes gpt_io.c.
+add_executable(test_gpt_io test_gpt_io.c)
+target_link_libraries(test_gpt_io gpt ${CMOCKA_LIBRARIES})
+add_test(NAME test_gpt_io COMMAND test_gpt_io)
+
 # CUDA kernel tests (Task 9 + Task 10) — compiled only on a machine with a CUDA
 # toolchain (Colab). Each test runs the CPU function as the oracle and the
 # matching CUDA kernel under test, then asserts they agree within tolerance.
