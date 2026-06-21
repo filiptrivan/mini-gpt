@@ -73,13 +73,17 @@ static double rng_uniform(uint64_t *state) {
  * For temperature sampling we form probabilities ∝ exp(logit / temperature) and
  * draw from that categorical distribution. We subtract the max logit first for
  * numerical stability (so exp() never overflows — it shifts every probability by
- * the same constant factor, which cancels in the normalization). To avoid
- * allocating a probabilities array we do it in two passes: one to get the
- * normalizer (sum), one to walk the cumulative distribution until it passes a
- * uniform draw scaled by that sum.
+ * the same constant factor, which cancels in the normalization). We do it in two
+ * passes — first the normalizer (sum), then a walk of the cumulative
+ * distribution until it passes a uniform draw scaled by that sum — but cache
+ * each token's exp() in `weights` so the second pass reuses it instead of
+ * recomputing (exp is by far the costliest operation here).
+ *
+ *   weights : caller-provided scratch of length >= V, reused across calls so we
+ *             don't malloc per generated token. Filled and consumed internally.
  */
 static int sample_token(const float *logits, int V, float temperature,
-                        uint64_t *rng) {
+                        uint64_t *rng, double *weights) {
     /* Greedy: the single most likely token. Deterministic, ignores the RNG. */
     if (temperature <= 0.0f) {
         int best = 0;
@@ -96,18 +100,21 @@ static int sample_token(const float *logits, int V, float temperature,
         if (logits[i] > maxv) maxv = logits[i];
     }
 
-    /* Pass 1: the normalizer (sum of exponentials). */
+    /* Pass 1: compute each token's weight exp((logit-max)/temp) ONCE, caching it
+     * in `weights`, while summing to get the normalizer. */
     double sum = 0.0;
     for (int i = 0; i < V; i++) {
-        sum += exp((double)(logits[i] - maxv) / (double)temperature);
+        double w = exp((double)(logits[i] - maxv) / (double)temperature);
+        weights[i] = w;
+        sum += w;
     }
 
-    /* Draw a target point in [0, sum) and find the token whose cumulative
-     * probability mass crosses it — that's the sampled token. */
+    /* Draw a target point in [0, sum) and walk the cached weights until the
+     * cumulative mass crosses it — that's the sampled token. */
     double target = rng_uniform(rng) * sum;
     double acc = 0.0;
     for (int i = 0; i < V; i++) {
-        acc += exp((double)(logits[i] - maxv) / (double)temperature);
+        acc += weights[i];
         if (acc >= target) return i;
     }
     return V - 1;  /* floating-point fallback: target == sum exactly */
@@ -178,8 +185,13 @@ int main(int argc, char **argv) {
      * we never reallocate mid-loop. */
     size_t capacity = prompt_count + (size_t)max_new_tokens;
     int *tokens = malloc(capacity * sizeof(int));
-    if (tokens == NULL) {
+    /* Reused scratch the sampler fills with per-token weights — allocated once
+     * here rather than once per generated token. */
+    double *weights = malloc((size_t)V * sizeof(double));
+    if (tokens == NULL || weights == NULL) {
         fprintf(stderr, "Out of memory\n");
+        free(tokens);
+        free(weights);
         free(prompt_tokens);
         bpe_free(tok);
         gpt_free(&model);
@@ -210,9 +222,10 @@ int main(int argc, char **argv) {
         /* Forward with targets == NULL: no loss, just logits/probs. B = 1. */
         gpt_forward(&model, ctx, NULL, /*B=*/1, T);
 
-        /* Logits for the LAST position are the prediction for the next token. */
+        /* Logits for the LAST position are the prediction for the next token.
+         * a.logits has shape (B, T, V) with B = 1, so row T-1 starts at (T-1)*V. */
         const float *logits_last = model.a.logits + (size_t)(T - 1) * V;
-        int next = sample_token(logits_last, V, temperature, &seed);
+        int next = sample_token(logits_last, V, temperature, &seed, weights);
 
         tokens[count++] = next;
 
@@ -230,6 +243,7 @@ int main(int argc, char **argv) {
 
     /* ---- Cleanup ---- */
     free(tokens);
+    free(weights);
     bpe_free(tok);
     gpt_free(&model);
     return 0;
