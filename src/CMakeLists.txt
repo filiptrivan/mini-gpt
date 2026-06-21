@@ -84,6 +84,19 @@ endif()
 # plain single-process CPU loop.
 add_executable(train train.c)
 target_link_libraries(train gpt adamw dataloader)
+if(ENABLE_CUDA)
+    # GPU training (Task 12): link the full-model CUDA forward/backward (Task 10).
+    # cuda_gpt PUBLIC-links cuda_layers + gpt, so those arrive transitively, and
+    # its include dir lets train.c resolve "cuda/gpt_cuda.cuh". With USE_CUDA
+    # defined, train.c's loop calls gpt_forward_cuda/gpt_backward_cuda instead of
+    # the CPU pass.
+    target_link_libraries(train cuda_gpt)
+    # train.c is compiled as C, but the final executable now pulls in device code
+    # (cuda_gpt). Link it with the CUDA toolchain so the CUDA runtime AND the C++
+    # runtime that nvcc-compiled objects depend on are added automatically — a
+    # plain C link would fail with undefined cudart / libstdc++ symbols.
+    set_target_properties(train PROPERTIES LINKER_LANGUAGE CUDA)
+endif()
 if(ENABLE_MPI)
     target_link_libraries(train mpi_utils MPI::MPI_C)
 endif()

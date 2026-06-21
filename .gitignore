@@ -4,6 +4,15 @@ build/
 # Raw personal data — never commit
 data/raw/
 
+# Generated tokenizer + token binaries (regenerable from the committed clean
+# text via train_bpe/tokenize; keep them out of git). The cleaned .txt corpus
+# in data/processed/ is intentionally tracked and not matched by these.
+data/processed/*.bpe
+data/processed/*.bin
+
+# Colab training logs (tee'd by the notebook)
+train_np*.log
+
 # Compiled object files
 *.o
 *.a

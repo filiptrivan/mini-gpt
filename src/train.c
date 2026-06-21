@@ -48,6 +48,10 @@
 #include "distributed/mpi_utils.h"  /* mpi_setup/teardown, allreduce_mean, broadcast */
 #endif
 
+#ifdef USE_CUDA
+#include "cuda/gpt_cuda.cuh"  /* gpt_forward_cuda / gpt_backward_cuda (Task 10) */
+#endif
+
 /*
  * mpi_teardown_if_enabled — finalize MPI on an MPI build, do nothing otherwise.
  *
@@ -136,12 +140,20 @@ int main(int argc, char **argv) {
 #endif
 
     if (rank == 0) {
+        /* Which compute path this binary was built with — makes the 1-vs-2 and
+         * CPU-vs-GPU benchmark logs self-explanatory. */
+#ifdef USE_CUDA
+        const char *device = "CUDA (GPU)";
+#else
+        const char *device = "CPU";
+#endif
         /* Only the leader prints, so the header appears once, not once per rank.
          * world_size and the effective batch (B*T per rank x ranks) make it
          * clear how much data each step actually consumes under MPI. */
-        printf("Model: %d parameters | batch %dx%d x %d rank(s) "
+        printf("Model: %d parameters | %s | batch %dx%d x %d rank(s) "
                "(effective %d tok/step) | %d steps | lr %g\n",
-               model.num_params, B, T, world_size, B * T * world_size, steps, lr);
+               model.num_params, device, B, T, world_size,
+               B * T * world_size, steps, lr);
     }
 
     /* ---- Optimizer ---- */
@@ -170,9 +182,20 @@ int main(int argc, char **argv) {
     for (int step = 0; step < steps; step++) {
         dataloader_next_batch(loader, inputs, targets);
 
+#ifdef USE_CUDA
+        /* GPU path: forward + backward run as CUDA kernels with the tensors kept
+         * resident on the device between kernels (see src/cuda/gpt_cuda.cu).
+         * gpt_backward_cuda zeroes the device gradients itself, so there is NO
+         * gpt_zero_grad here. Both calls re-upload model.params and copy
+         * model.loss / model.grads back to the host, so the host-side MPI
+         * averaging and adamw_step below operate on fresh values unchanged. */
+        gpt_forward_cuda(&model, inputs, targets, B, T);
+        gpt_backward_cuda(&model, inputs, targets, B, T);
+#else
         gpt_zero_grad(&model);
         gpt_forward(&model, inputs, targets, B, T);
         gpt_backward(&model, inputs, targets, B, T);
+#endif
 
 #ifdef USE_MPI
         /* The data-parallel core: average every rank's gradients before the
