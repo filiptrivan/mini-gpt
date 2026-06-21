@@ -76,6 +76,17 @@
 
 #include <stddef.h>  /* size_t */
 
+/* These are C functions. The extern "C" guard stops a C++ compiler — e.g.
+ * nvcc compiling the .cu CUDA wiring in src/cuda/gpt_cuda.cu, or the CUDA
+ * test that uses attention_forward as an oracle — from name-mangling them, so
+ * the symbols link against the C-built `gpt` library. It is invisible to plain
+ * C and mirrors the guard already used in layers.h and cuda_layers.cuh. Having
+ * the header self-describe its linkage means C++/CUDA callers just #include it
+ * normally instead of wrapping the include in extern "C" at each call site. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * GPTConfig — the handful of numbers that define the model's shape.
  *
@@ -348,5 +359,65 @@ void gpt_zero_grad(GPTModel *model);
  */
 void gpt_backward(GPTModel *model, const int *tokens, const int *targets,
                   int B, int T);
+
+/*
+ * gpt_ensure_acts — (re)allocate the activation blocks for a given (B, T) and
+ * point model->a / model->da at their slices, WITHOUT running a forward pass.
+ *
+ * gpt_forward calls this internally on its first run; it is also exposed here
+ * so the CUDA wiring (src/cuda/gpt_cuda.cu) can size its device buffers and
+ * derive device sub-pointers from the host offsets (model->a.field -
+ * model->acts) before it has run anything on the GPU. After this returns,
+ * model->acts / model->grads_acts are allocated, model->num_acts is set, and
+ * model->B / model->T record the current shape.
+ *
+ *   model : an initialized model (from gpt_init).
+ *   B, T  : batch size and sequence length. T MUST be <= max_seq_len.
+ *
+ * Idempotent: calling it again with the same (B, T) is a no-op (the buffers
+ * are reused); a different (B, T) frees and re-allocates.
+ */
+void gpt_ensure_acts(GPTModel *model, int B, int T);
+
+/*
+ * attention_forward — causal multi-head self-attention (forward).
+ *
+ * Exposed (rather than left static in gpt.c) so the CUDA parity test can use
+ * this proven CPU implementation as the oracle for attention_forward_cuda —
+ * the same "CPU is the oracle" pattern the layer ops use. The full math is
+ * documented at the definition in gpt.c.
+ *
+ *   atty : (B, T, C)      attention output (weighted sum of Values), per head
+ *   att  : (B, NH, T, T)  softmax attention weights (cached for backward;
+ *                         masked future positions written as 0)
+ *   qkv  : (B, T, 3C)     concatenated Query, Key, Value for every token
+ *   B,T,C,NH             batch, sequence length, channels, number of heads
+ *                        (C must be divisible by NH; head_dim = C / NH)
+ *
+ * atty and att are caller-allocated outputs; qkv is read-only. No aliasing.
+ */
+void attention_forward(float *atty, float *att, const float *qkv,
+                       int B, int T, int C, int NH);
+
+/*
+ * attention_backward — gradient of causal multi-head self-attention.
+ *
+ * Exposed for the same CUDA-parity-test reason as attention_forward. Full
+ * derivation lives at the definition in gpt.c. Accumulates into d_qkv with +=
+ * (caller must pre-zero it), matching the project-wide backward convention.
+ *
+ *   d_qkv  : (B, T, 3C)   destination gradient of Q/K/V, accumulated with +=
+ *   d_atty : (B, T, C)    downstream gradient flowing into the attention output
+ *   qkv    : (B, T, 3C)   cached forward Q/K/V
+ *   att    : (B, NH, T, T) cached forward softmax weights
+ *   B,T,C,NH             same dimensions as the forward call
+ */
+void attention_backward(float *d_qkv, const float *d_atty,
+                        const float *qkv, const float *att,
+                        int B, int T, int C, int NH);
+
+#ifdef __cplusplus
+}  /* extern "C" */
+#endif
 
 #endif /* GPT_H */

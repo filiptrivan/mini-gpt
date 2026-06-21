@@ -203,6 +203,21 @@ static void ensure_acts(GPTModel *model, int B, int T) {
     model->T = T;
 }
 
+/*
+ * gpt_ensure_acts — public thin wrapper over the static ensure_acts above.
+ *
+ * gpt_forward already calls ensure_acts internally; this just gives external
+ * code (specifically the CUDA wiring in src/cuda/gpt_cuda.cu) a way to trigger
+ * the same lazy allocation so it can size its device buffers and read the host
+ * activation offsets, without having to run a CPU forward pass first. See the
+ * doc comment in gpt.h for the full contract.
+ */
+void gpt_ensure_acts(GPTModel *model, int B, int T) {
+    assert(model != NULL);
+    assert(B > 0 && T > 0 && T <= model->config.max_seq_len);
+    ensure_acts(model, B, T);
+}
+
 /* ====================================================================== */
 /*                        public: init / free                             */
 /* ====================================================================== */
@@ -300,8 +315,8 @@ void gpt_free(GPTModel *model) {
  * pass needs them. Masked-out entries (t2 > t) are written as 0 so the cache
  * is clean.
  */
-static void attention_forward(float *atty, float *att, const float *qkv,
-                              int B, int T, int C, int NH) {
+void attention_forward(float *atty, float *att, const float *qkv,
+                       int B, int T, int C, int NH) {
     int head_dim = C / NH;
     float scale = 1.0f / sqrtf((float)head_dim);
     int C3 = 3 * C;  /* row stride of qkv: Q (C) + K (C) + V (C) */
@@ -373,9 +388,9 @@ static void attention_forward(float *atty, float *att, const float *qkv,
  * `dscratch` is a small per-head-row workspace for d_att (length T); we
  * allocate one buffer up front and reuse it across all rows.
  */
-static void attention_backward(float *d_qkv, const float *d_atty,
-                               const float *qkv, const float *att,
-                               int B, int T, int C, int NH) {
+void attention_backward(float *d_qkv, const float *d_atty,
+                        const float *qkv, const float *att,
+                        int B, int T, int C, int NH) {
     int head_dim = C / NH;
     float scale = 1.0f / sqrtf((float)head_dim);
     int C3 = 3 * C;
