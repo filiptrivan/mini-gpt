@@ -48,6 +48,21 @@
 #include "distributed/mpi_utils.h"  /* mpi_setup/teardown, allreduce_mean, broadcast */
 #endif
 
+/*
+ * mpi_teardown_if_enabled — finalize MPI on an MPI build, do nothing otherwise.
+ *
+ * main() leaves through several early returns (bad args, load failure, out of
+ * memory) plus the normal path, and every one must finalize MPI when built with
+ * it. Wrapping the #ifdef once here lets each exit call a single plain function
+ * instead of repeating the guard, and keeps the CPU build (which doesn't link
+ * the MPI library) from referencing the mpi_teardown symbol at all.
+ */
+static void mpi_teardown_if_enabled(void) {
+#ifdef USE_MPI
+    mpi_teardown();
+#endif
+}
+
 int main(int argc, char **argv) {
     /* Process identity. Without MPI there is one process: rank 0 of 1, so all
      * the rank-gated logic below collapses to "just do it" on the CPU build. */
@@ -62,9 +77,7 @@ int main(int argc, char **argv) {
         if (rank == 0) {
             fprintf(stderr, "Usage: %s <tokens.bin> [steps] [lr]\n", argv[0]);
         }
-#ifdef USE_MPI
-        mpi_teardown();
-#endif
+        mpi_teardown_if_enabled();
         return 1;
     }
     const char *data_path = argv[1];
@@ -74,9 +87,7 @@ int main(int argc, char **argv) {
         if (rank == 0) {
             fprintf(stderr, "steps must be positive (got %d)\n", steps);
         }
-#ifdef USE_MPI
-        mpi_teardown();
-#endif
+        mpi_teardown_if_enabled();
         return 1;
     }
 
@@ -98,9 +109,7 @@ int main(int argc, char **argv) {
                     "Cannot load %s: need >= %d tokens, all ids in [0, %d).\n",
                     data_path, B * T + 1, cfg.vocab_size);
         }
-#ifdef USE_MPI
-        mpi_teardown();
-#endif
+        mpi_teardown_if_enabled();
         return 1;
     }
 
@@ -152,9 +161,7 @@ int main(int argc, char **argv) {
         }
         free(inputs); free(targets);
         adamw_free(&opt); gpt_free(&model); dataloader_free(loader);
-#ifdef USE_MPI
-        mpi_teardown();
-#endif
+        mpi_teardown_if_enabled();
         return 1;
     }
 
@@ -200,9 +207,7 @@ int main(int argc, char **argv) {
     adamw_free(&opt);
     gpt_free(&model);
     dataloader_free(loader);
-#ifdef USE_MPI
     /* Last MPI call: release MPI's resources and let mpirun exit cleanly. */
-    mpi_teardown();
-#endif
+    mpi_teardown_if_enabled();
     return 0;
 }

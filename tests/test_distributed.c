@@ -63,21 +63,23 @@
 /* ------------------------------------------------------------------ */
 
 /*
- * assert_synced_across_ranks — fail unless `local[i]` is the same value on
- * every rank, for all i.
+ * max_cross_rank_spread — the largest disagreement, over all elements, between
+ * the ranks' copies of `local`.
  *
  * The trick: reduce the element-wise MAX and the element-wise MIN of `local`
- * across all ranks. If a given element is identical everywhere, its max equals
- * its min; if any rank disagrees, max > min and the assert fires. We use
- * separate send/recv buffers here (local -> gmax/gmin) so `local` is untouched.
+ * across all ranks. For element i, (max - min) is exactly how far apart the
+ * ranks are on that element: 0 means every rank agrees, anything bigger means
+ * they differ. We return the worst (largest) such gap. Both "are the ranks in
+ * sync?" and "did the ranks genuinely differ?" reduce to a threshold on this
+ * one number, so both callers below share this single reduction instead of each
+ * open-coding the malloc + two MPI_Allreduce + scan. We use separate send/recv
+ * buffers (local -> gmax/gmin) so `local` itself is untouched.
  *
  *   local : this rank's array, length n (read-only).
  *   n     : number of elements.
- *   tol   : allowed |max - min| (use a tiny epsilon; floating-point reductions
- *           are bit-identical across ranks for the same op, so 0 would usually
- *           work, but a hair of slack keeps the intent clear).
+ * Returns: max over i of |max_rank(local[i]) - min_rank(local[i])|.
  */
-static void assert_synced_across_ranks(const float *local, int n, float tol) {
+static float max_cross_rank_spread(const float *local, int n) {
     float *gmax = (float *)malloc((size_t)n * sizeof(float));
     float *gmin = (float *)malloc((size_t)n * sizeof(float));
     assert_non_null(gmax);
@@ -86,11 +88,27 @@ static void assert_synced_across_ranks(const float *local, int n, float tol) {
     MPI_Allreduce(local, gmax, n, MPI_FLOAT, MPI_MAX, MPI_COMM_WORLD);
     MPI_Allreduce(local, gmin, n, MPI_FLOAT, MPI_MIN, MPI_COMM_WORLD);
 
+    float worst = 0.0f;
     for (int i = 0; i < n; i++) {
-        assert_float_equal(gmax[i], gmin[i], tol);
+        float gap = fabsf(gmax[i] - gmin[i]);
+        if (gap > worst) worst = gap;
     }
     free(gmax);
     free(gmin);
+    return worst;
+}
+
+/*
+ * assert_synced_across_ranks — fail unless `local[i]` is the same value on
+ * every rank, for all i. The defining property we check after a broadcast or an
+ * all-reduce: if the worst cross-rank gap is within tol, the ranks agree.
+ *
+ *   tol : allowed gap (use a tiny epsilon; floating-point reductions are
+ *         bit-identical across ranks for the same op, so 0 would usually work,
+ *         but a hair of slack keeps the intent clear).
+ */
+static void assert_synced_across_ranks(const float *local, int n, float tol) {
+    assert_true(max_cross_rank_spread(local, n) <= tol);
 }
 
 /* ------------------------------------------------------------------ */
@@ -233,21 +251,10 @@ static void test_one_step_keeps_params_in_sync(void **state) {
 
     /* With more than one rank the LOCAL gradients should differ — otherwise the
      * test would pass trivially without ever exercising the averaging. Confirm
-     * at least one gradient element disagrees across ranks before we average. */
+     * at least one gradient element disagrees across ranks before we average:
+     * a nonzero cross-rank spread means the per-rank batches really differed. */
     if (world > 1) {
-        float *gmax = (float *)malloc((size_t)model.num_params * sizeof(float));
-        float *gmin = (float *)malloc((size_t)model.num_params * sizeof(float));
-        assert_non_null(gmax);
-        assert_non_null(gmin);
-        MPI_Allreduce(model.grads, gmax, model.num_params, MPI_FLOAT, MPI_MAX, MPI_COMM_WORLD);
-        MPI_Allreduce(model.grads, gmin, model.num_params, MPI_FLOAT, MPI_MIN, MPI_COMM_WORLD);
-        int any_diff = 0;
-        for (int i = 0; i < model.num_params; i++) {
-            if (fabsf(gmax[i] - gmin[i]) > 1e-6f) { any_diff = 1; break; }
-        }
-        free(gmax);
-        free(gmin);
-        assert_true(any_diff);  /* the batches really were different per rank */
+        assert_true(max_cross_rank_spread(model.grads, model.num_params) > 1e-6f);
     }
 
     /* The data-parallel core: average gradients, then everyone steps the same. */
