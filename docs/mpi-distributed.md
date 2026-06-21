@@ -148,18 +148,25 @@ cmake -B build -DENABLE_MPI=ON          # add -DENABLE_CUDA=ON for the GPU too
 cmake --build build
 
 # Run the distributed unit tests directly...
-mpirun --allow-run-as-root -np 2 ./build/tests/test_distributed
+mpirun --allow-run-as-root --oversubscribe -np 2 ./build/tests/test_distributed
 
 # ...or via ctest (registered to launch under mpirun automatically):
 ctest --test-dir build --output-on-failure -R test_distributed
 
-# Data-parallel training across 2 processes:
-mpirun --allow-run-as-root -np 2 ./build/train data/processed/tokens.bin 100
+# Data-parallel training across 2 processes (binary is at build/src/train):
+mpirun --allow-run-as-root --oversubscribe -np 2 ./build/src/train data/processed/tokens.bin 100
 ```
 
-`--allow-run-as-root` is needed because Colab runs as root and Open MPI refuses
-that by default. On your Mac, leave `ENABLE_MPI=OFF`: the `mpi_utils` library and
-the `test_distributed` test are skipped entirely and the CPU build is unchanged.
+Two Colab-specific `mpirun` flags:
+
+- `--allow-run-as-root` — Colab runs as root and Open MPI refuses that by default.
+- `--oversubscribe` — a Colab VM reports only **one** allocatable "slot", so
+  launching 2 ranks otherwise fails with *"not enough slots available."* This
+  flag lets the ranks share the available core(s); fine for our tiny job. (The
+  `ctest` registration in `tests/CMakeLists.txt` already includes both flags.)
+
+On your Mac, leave `ENABLE_MPI=OFF`: the `mpi_utils` library and the
+`test_distributed` test are skipped entirely and the CPU build is unchanged.
 
 ## What to expect
 

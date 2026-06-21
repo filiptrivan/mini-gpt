@@ -82,12 +82,19 @@ if(ENABLE_MPI)
     add_executable(test_distributed test_distributed.c)
     target_link_libraries(test_distributed
         mpi_utils gpt adamw test_utils MPI::MPI_C ${CMOCKA_LIBRARIES})
-    # ctest invocation: mpirun --allow-run-as-root -np 2 ./test_distributed
-    # MPIEXEC_EXECUTABLE / _NUMPROC_FLAG / _PREFLAGS come from FindMPI. Colab
-    # runs as root and OpenMPI refuses that without --allow-run-as-root, so we
-    # add it here to match the project's documented manual command (CLAUDE.md);
-    # OpenMPI accepts the flag whether or not you are actually root.
+    # ctest invocation: mpirun --allow-run-as-root --oversubscribe -np 2 ./...
+    # MPIEXEC_EXECUTABLE / _NUMPROC_FLAG / _PREFLAGS come from FindMPI. Two
+    # Colab-specific flags are needed:
+    #   --allow-run-as-root : Colab runs as root and OpenMPI refuses that by
+    #                         default (matches the manual command in CLAUDE.md).
+    #   --oversubscribe     : a Colab VM reports only ONE allocatable "slot", so
+    #                         launching 2 ranks otherwise fails with "not enough
+    #                         slots". Oversubscribe lets the 2 ranks share the
+    #                         available core(s) — fine here since the test is
+    #                         tiny and the ranks mostly wait on each other.
+    # OpenMPI accepts both flags whether or not the constraint actually applies.
     add_test(NAME test_distributed
-             COMMAND ${MPIEXEC_EXECUTABLE} --allow-run-as-root ${MPIEXEC_PREFLAGS}
-                     ${MPIEXEC_NUMPROC_FLAG} 2 $<TARGET_FILE:test_distributed>)
+             COMMAND ${MPIEXEC_EXECUTABLE} --allow-run-as-root --oversubscribe
+                     ${MPIEXEC_PREFLAGS} ${MPIEXEC_NUMPROC_FLAG} 2
+                     $<TARGET_FILE:test_distributed>)
 endif()
