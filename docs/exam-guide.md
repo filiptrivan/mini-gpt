@@ -1,12 +1,8 @@
 # Mini GPT — Visual Exam Guide
 
-A one-page-per-topic, **diagram-first** review of the whole project: a small
-GPT built from scratch in **C**, made **concurrent** with CUDA and
+A small GPT built from scratch in **C**, made **concurrent** with CUDA and
 **distributed** with MPI. Every section is one picture plus a few lines.
 
-> Read each diagram top-to-bottom (or left-to-right) following the arrows. The
-> deep write-ups live in the other files in `docs/`; this one is for *seeing*
-> how the pieces fit before the exam.
 
 ## Contents
 
