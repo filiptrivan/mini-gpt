@@ -127,7 +127,9 @@ colab/         setup.sh + train.ipynb (end-to-end on a T4)
 
 ## Docs
 
-Each component has a beginner-oriented explainer in [`docs/`](docs/):
+Start with the **[visual exam guide](docs/exam-guide.md)** — the whole system
+as mermaid diagrams, one topic per picture. Then each component has a
+beginner-oriented explainer in [`docs/`](docs/):
 [forward](docs/forward-pass.md) · [backward](docs/backward-pass.md) ·
 [GPT model](docs/gpt-model.md) · [BPE](docs/bpe-training.md) ·
 [DataLoader](docs/dataloader.md) · [AdamW](docs/adamw.md) ·
