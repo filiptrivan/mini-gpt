@@ -33,3 +33,4 @@ _deps/
 *.swp
 *.swo
 .DS_Store
+scripts/find_ai_domains.sh
